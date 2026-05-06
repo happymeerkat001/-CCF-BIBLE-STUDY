@@ -26,11 +26,59 @@ DEFAULT_MACULA_BASE_URL = (
 )
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324"
+DEFAULT_FALLBACK_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
     "/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
     "Neural-orchestrator/Bible Study"
 )
+ALLOWED_MARK_BACKGROUNDS = {"yellow", "salmon", "cyan", "lightgreen"}
+ALLOWED_MARK_TEXT = {
+    "and",
+    "but",
+    "now",
+    "then",
+    "therefore",
+    "so",
+    "because",
+    "that",
+    "which",
+    "who",
+    "where",
+    "when",
+    "for",
+    "if",
+    "unless",
+    "so that",
+    "by which",
+}
+ALLOWED_PREPOSITION_TEXT = {
+    "to",
+    "from",
+    "in",
+    "on",
+    "with",
+    "for",
+    "into",
+    "of",
+    "at",
+    "by",
+    "after",
+    "before",
+    "upon",
+    "over",
+    "under",
+    "through",
+    "across",
+    "within",
+    "without",
+    "among",
+    "between",
+    "around",
+    "toward",
+    "towards",
+    "out of",
+}
 
 BOOK_CODE_TO_SLUG = {
     "MAT": "matthew",
@@ -679,18 +727,14 @@ def build_user_prompt(
     )
 
 
-def call_openrouter(prompt: str, model: str) -> tuple[str, dict[str, Any]]:
+def call_openrouter_messages(messages: list[dict[str, str]], model: str) -> tuple[str, dict[str, Any]]:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise DiagramError("OPENROUTER_API_KEY is required in .env or the environment.")
 
-    system_prompt = load_system_prompt()
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ],
+        "messages": messages,
     }
     request = urllib.request.Request(
         os.getenv("OPENROUTER_API_ENDPOINT", DEFAULT_OPENROUTER_ENDPOINT),
@@ -720,6 +764,124 @@ def call_openrouter(prompt: str, model: str) -> tuple[str, dict[str, Any]]:
         raise DiagramError(f"OpenRouter returned empty content: {raw}")
     usage = raw.get("usage", {})
     return content, usage
+
+
+def call_openrouter(prompt: str, model: str) -> tuple[str, dict[str, Any]]:
+    system_prompt = load_system_prompt()
+    return call_openrouter_messages(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        model,
+    )
+
+
+def normalize_marker_text(text: str) -> str:
+    normalized = text.strip().strip("\"'“”‘’.,;:!?()[]{}")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.lower()
+
+
+def validate_diagram_body(body: str) -> list[str]:
+    errors: list[str] = []
+    stripped = body.lstrip()
+    if not stripped.startswith("<strong>1</strong>"):
+        errors.append("Output must begin directly with the first verse number and contain no explanatory preamble.")
+    if re.search(r"<mark(?![^>]*background:)", body):
+        errors.append("Every <mark> tag must include an explicit allowed background.")
+    if "background: red" in body:
+        errors.append("Do not use background: red.")
+    if '<mark style="color: red;">' in body:
+        errors.append("Do not use <mark style=\"color: red;\">; use a red <span> for prepositions.")
+
+    mark_pattern = re.compile(r'<mark\s+style="([^"]*)">(.*?)</mark>', re.DOTALL)
+    for style, content in mark_pattern.findall(body):
+        background_match = re.search(r"background:\s*([^;]+)", style)
+        if not background_match:
+            errors.append(f"Invalid <mark> style without background: {style}")
+            continue
+        background = background_match.group(1).strip()
+        if background not in ALLOWED_MARK_BACKGROUNDS:
+            errors.append(f"Invalid <mark> background: {background}")
+        marker_text = normalize_marker_text(re.sub(r"<[^>]+>", "", content))
+        if marker_text and marker_text not in ALLOWED_MARK_TEXT:
+            errors.append(f"Invalid highlighted marker text: {marker_text}")
+
+    span_pattern = re.compile(r'<span\s+style="color: red;">(.*?)</span>', re.DOTALL)
+    for content in span_pattern.findall(body):
+        preposition_text = normalize_marker_text(re.sub(r"<[^>]+>", "", content))
+        if preposition_text and preposition_text not in ALLOWED_PREPOSITION_TEXT:
+            errors.append(f"Invalid red preposition text: {preposition_text}")
+
+    if re.search(r'<u>([^<]*\bto\b[^<]*)</u>', body):
+        errors.append("Infinitive phrases with 'to + verb' must use wavy underline, not single underline.")
+    if re.search(r'\bto\s+<u>([^<]+)</u>', body):
+        errors.append("Do not split English infinitives across plain text and single underline; use one wavy underline span.")
+
+    seen: set[str] = set()
+    unique_errors: list[str] = []
+    for error in errors:
+        if error not in seen:
+            seen.add(error)
+            unique_errors.append(error)
+    return unique_errors
+
+
+def build_repair_prompt(original_prompt: str, draft_body: str, errors: list[str]) -> str:
+    repair_lines = "\n".join(f"- {error}" for error in errors)
+    return (
+        "Revise the following draft diagram so it fully obeys the formatting rules.\n"
+        "Keep the same verse order and the same English verse text.\n"
+        "Return only corrected HTML-in-Markdown body content with no explanation.\n\n"
+        "Validation errors to fix:\n"
+        f"{repair_lines}\n\n"
+        "Original source data:\n"
+        f"{original_prompt}\n"
+        "Draft output to repair:\n"
+        f"{draft_body}\n"
+    )
+
+
+def generate_validated_diagram(prompt: str, model: str, max_attempts: int = 3) -> tuple[str, dict[str, Any]]:
+    body, usage = call_openrouter(prompt, model)
+    errors = validate_diagram_body(body)
+    if not errors:
+        return body, usage
+
+    total_usage = dict(usage)
+    for _ in range(max_attempts - 1):
+        repair_prompt = build_repair_prompt(prompt, body, errors)
+        body, repair_usage = call_openrouter(repair_prompt, model)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            total_usage[key] = total_usage.get(key, 0) + repair_usage.get(key, 0)
+        errors = validate_diagram_body(body)
+        if not errors:
+            return body, total_usage
+
+    fallback_model = os.getenv("DIAGRAM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL).strip()
+    if fallback_model and fallback_model != model:
+        print(
+            f"Warning: {model} failed diagram validation; retrying with fallback model {fallback_model}.",
+            file=sys.stderr,
+        )
+        body, fallback_usage = call_openrouter(prompt, fallback_model)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            total_usage[key] = total_usage.get(key, 0) + fallback_usage.get(key, 0)
+        errors = validate_diagram_body(body)
+        if not errors:
+            return body, total_usage
+
+        for _ in range(max_attempts - 1):
+            repair_prompt = build_repair_prompt(prompt, body, errors)
+            body, repair_usage = call_openrouter(repair_prompt, fallback_model)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                total_usage[key] = total_usage.get(key, 0) + repair_usage.get(key, 0)
+            errors = validate_diagram_body(body)
+            if not errors:
+                return body, total_usage
+
+    raise DiagramError("Model output failed validation after repair attempts:\n- " + "\n- ".join(errors))
 
 
 def write_output(reference: Reference, body: str, usage: dict[str, Any], output_dir: Path) -> Path:
@@ -857,7 +1019,7 @@ def main() -> int:
         print(prompt)
         return 0
 
-    body, usage = call_openrouter(prompt, args.model)
+    body, usage = generate_validated_diagram(prompt, args.model)
     # Obsidian Live Preview does not consistently render HTML entities like `&nbsp;`.
     # Convert them to real NBSP characters so indentation displays correctly while editing.
     body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
