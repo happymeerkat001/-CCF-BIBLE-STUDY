@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -310,7 +311,6 @@ class BoldWord:
 COMMENTARY_SOURCE_METADATA = {
     "fbc": {"label": "FreeBibleCommentary — Utley", "emoji": "📖"},
     "net": {"label": "NET Bible Notes", "emoji": "📗"},
-    "pentecost": {"label": "Words & Works of Jesus — Pentecost", "emoji": "✝️"},
     "keener": {"label": "IVP Bible Background — Keener", "emoji": "🌍"},
 }
 
@@ -574,7 +574,7 @@ def parse_requested_commentary_sources(raw: str) -> list[str]:
         raise DiagramError(
             "Unknown commentary source(s): "
             + ", ".join(sorted(invalid))
-            + ". Use fbc, net, pentecost, keener, or all."
+            + ". Use fbc, net, keener, or all."
         )
     seen: set[str] = set()
     ordered: list[str] = []
@@ -1449,7 +1449,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--commentary-sources",
         default="fbc",
-        help="Comma-separated commentary sources: fbc, net, pentecost, keener, or all",
+        help="Comma-separated commentary sources: fbc, net, keener, or all",
     )
     parser.add_argument(
         "--bold-words",
@@ -1470,31 +1470,46 @@ def main() -> int:
     data_dir = Path(args.data_dir)
     xml_path = ensure_macula_xml(reference, data_dir)
     verse_words = extract_macula_words(xml_path, reference)
-    if args.english_source == "macula-gloss":
-        english_text = build_gloss_fallback(verse_words)
-    else:
+    # --- Parallelize independent I/O: Bible text, commentary sources, BDAG index ---
+    bdag_index: dict[str, str] = {}
+    commentary_sources: list[CommentarySource] = []
+    english_text = ""
+
+    requested_sources: list[str] = []
+    if args.footnotes:
+        requested_sources = parse_requested_commentary_sources(args.commentary_sources)
+
+    def _fetch_english() -> str:
+        if args.english_source == "macula-gloss":
+            return build_gloss_fallback(verse_words)
         try:
-            english_text = fetch_bible_text(reference)
+            return fetch_bible_text(reference)
         except DiagramError as exc:
             if args.english_source == "api-bible":
                 raise
             print(f"Warning: API.Bible failed ({exc}), falling back to MACULA glosses.", file=sys.stderr)
-            english_text = build_gloss_fallback(verse_words)
-    english_text = sanitize_english_text(english_text)
-    bdag_index: dict[str, str] = {}
-    if args.bold_words:
-        bdag_index = load_bdag_index(data_dir)
+            return build_gloss_fallback(verse_words)
 
-    commentary_sources: list[CommentarySource] = []
-    if args.footnotes:
-        requested_sources = parse_requested_commentary_sources(args.commentary_sources)
+    def _fetch_commentary(key: str) -> CommentarySource:
+        if key == "fbc":
+            return fetch_fbc_commentary_source(reference)
+        if key == "net":
+            return fetch_net_bible_notes(reference)
+        return load_pdf_commentary(reference, key, data_dir)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        english_future = pool.submit(_fetch_english)
+        commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
+        bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
+
+        english_text = sanitize_english_text(english_future.result())
+        if bdag_future is not None:
+            bdag_index = bdag_future.result()
         for key in requested_sources:
-            if key == "fbc":
-                commentary_sources.append(fetch_fbc_commentary_source(reference))
-            elif key == "net":
-                commentary_sources.append(fetch_net_bible_notes(reference))
-            else:
-                commentary_sources.append(load_pdf_commentary(reference, key, data_dir))
+            try:
+                commentary_sources.append(commentary_futures[key].result())
+            except Exception as exc:
+                print(f"Warning: {key} commentary failed ({exc}), skipping.", file=sys.stderr)
     prompt = build_user_prompt(reference, verse_words, english_text)
 
     if args.dump_prompt:

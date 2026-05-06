@@ -167,16 +167,14 @@ This writes:
 - `data/bdag.pdf`
 - `data/bdag_index.json`
 
-Before using local PDF commentary sources such as `pentecost` or `keener`, build each book index once:
+Before using local PDF commentary sources such as `keener`, build each book index once:
 
 ```bash
-python3 index_commentary_pdf.py --pdf "/real/path/to/pentecost.pdf" --book john --key pentecost
 python3 index_commentary_pdf.py --pdf "/real/path/to/keener.pdf" --book john --key keener
 ```
 
 This writes files such as:
 
-- `data/pentecost_john.json`
 - `data/keener_john.json`
 
 Use a real PDF path. `path/to/...` in examples is a placeholder, so the command will fail until the PDF exists at that location. Run scripts with `python3 script_name.py` from this folder, or `./script_name.py` only after making the script executable and using the `./` prefix.
@@ -188,7 +186,7 @@ Use a real PDF path. `path/to/...` in examples is a placeholder, so the command 
 - If API.Bible is unavailable or your key is not authorized, `--english-source macula-gloss` uses MACULA glosses as the English source.
 - `--dump-prompt` is useful for prompt tuning before spending tokens.
 - `--footnotes` appends commentary after each verse block.
-- `--commentary-sources` accepts `fbc`, `net`, `pentecost`, `keener`, or `all`.
+- `--commentary-sources` accepts `fbc`, `net`, `keener`, or `all`.
 - `--footnotes-style collapse` is the default and renders nested `<details>` blocks: one outer block per verse, then one inner block per commentary source.
 - `--footnotes` with no `--commentary-sources` uses `fbc` by default for backward compatibility.
 - `--bold-words` bolds lexically significant Greek-linked English terms inside the generated diagram and requires `data/bdag_index.json`.
