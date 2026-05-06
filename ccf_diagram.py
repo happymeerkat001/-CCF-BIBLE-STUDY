@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -25,6 +26,7 @@ DEFAULT_MACULA_BASE_URL = (
 )
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
+DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
     "/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
     "Neural-orchestrator/Bible Study"
@@ -93,6 +95,35 @@ BOOK_FILENAME_ORDER = [
 BOOK_XML_FILENAMES = {
     slug: f"{index:02d}-{slug}.xml" for index, slug in enumerate(BOOK_FILENAME_ORDER, start=1)
 }
+BOOK_TO_FBC_SERIES = {
+    "matthew": ("VOL01", "VOL01"),
+    "mark": ("VOL02", "VOL02"),
+    "1peter": ("VOL02", "VOL02B"),
+    "2peter": ("VOL02", "VOL02B"),
+    "luke": ("VOL03A", "VOL03A"),
+    "acts": ("VOL03B", "VOL03B"),
+    "john": ("VOL04", "VOL04"),
+    "1john": ("VOL04", "VOL04"),
+    "2john": ("VOL04", "VOL04"),
+    "3john": ("VOL04", "VOL04"),
+    "romans": ("VOL05", "VOL05"),
+    "1corinthians": ("VOL06", "VOL06"),
+    "2corinthians": ("VOL06", "VOL06"),
+    "galatians": ("VOL07", "VOL07"),
+    "1thessalonians": ("VOL07", "VOL07"),
+    "2thessalonians": ("VOL07", "VOL07"),
+    "ephesians": ("VOL08", "VOL08"),
+    "philippians": ("VOL08", "VOL08"),
+    "colossians": ("VOL08", "VOL08"),
+    "philemon": ("VOL08", "VOL08"),
+    "1timothy": ("VOL09", "VOL09"),
+    "2timothy": ("VOL09", "VOL09"),
+    "titus": ("VOL09", "VOL09"),
+    "hebrews": ("VOL10", "VOL10"),
+    "james": ("VOL11", "VOL11"),
+    "jude": ("VOL11", "VOL11"),
+    "revelation": ("VOL12", "VOL12"),
+}
 PROMPT_PATH = Path("prompts/diagram_system.md")
 
 
@@ -139,6 +170,17 @@ class WordEntry:
     after: str
     depth: int
     groups: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class CommentaryNote:
+    heading: str
+    body_parts: list[str] = field(default_factory=list)
+
+    def render(self) -> str:
+        heading = _normalize_commentary_text(self.heading)
+        body = " ".join(_normalize_commentary_text(part) for part in self.body_parts if part.strip())
+        return f"{heading} {body}".strip() if body else heading
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -231,6 +273,197 @@ def http_get_text(url: str, headers: dict[str, str] | None = None) -> str:
         raise DiagramError(f"HTTP {exc.code} from {url}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise DiagramError(f"Network error for {url}: {exc}") from exc
+
+
+def build_fbc_url(reference: Reference) -> str:
+    series = BOOK_TO_FBC_SERIES.get(reference.book_slug)
+    if not series:
+        raise DiagramError(
+            f"FreeBibleCommentary mapping is not available for {reference.book_slug}."
+        )
+    directory_code, file_code = series
+    chapter_label = f"{reference.chapter:02d}"
+    return (
+        f"{DEFAULT_FREEBIBLECOMMENTARY_BASE_URL}/new_testament_studies/"
+        f"{directory_code}/{file_code}_{chapter_label}.html"
+    )
+
+
+def fetch_commentary(reference: Reference) -> dict[int, list[str]]:
+    url = build_fbc_url(reference)
+    html_text = http_get_text(
+        url,
+        headers={"User-Agent": "CCF Bible Study Diagram Generator/1.0"},
+    )
+    lines = extract_fbc_text_lines(html_text, url)
+    return parse_fbc_commentary_lines(reference, lines)
+
+
+def extract_fbc_text_lines(raw_html: str, base_url: str) -> list[str]:
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", "\n", raw_html)
+
+    def replace_anchor(match: re.Match[str]) -> str:
+        href = match.group(1)
+        label = re.sub(r"(?is)<[^>]+>", "", match.group(2))
+        absolute = urllib.parse.urljoin(base_url, html.unescape(href))
+        return f"[{html.unescape(label).strip()}]({absolute})"
+
+    text = re.sub(
+        r'(?is)<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        replace_anchor,
+        text,
+    )
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</?(?:p|div|tr|td|th|table|section|article|blockquote|ul|ol|li|h[1-6]|hr)\b[^>]*>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", "", text)
+    text = html.unescape(text).replace("\xa0", " ")
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+
+def parse_fbc_commentary_lines(reference: Reference, lines: list[str]) -> dict[int, list[str]]:
+    section_re = re.compile(
+        rf"^NASB \(UPDATED\) TEXT:\s+.*?\b{reference.chapter}:(\d+)(?:-(\d+))?$",
+        re.IGNORECASE,
+    )
+    verse_re = re.compile(
+        rf"^{reference.chapter}:(\d+)(?:-(\d+))?\s+(.*)$",
+        re.IGNORECASE,
+    )
+    commentary: dict[int, list[str]] = {}
+    in_word_study = False
+    current_targets: list[int] = []
+    current_note: CommentaryNote | None = None
+
+    def store_note() -> None:
+        nonlocal current_note
+        if not current_note or not current_targets:
+            current_note = None
+            return
+        rendered = current_note.render()
+        if rendered:
+            for verse in current_targets:
+                commentary.setdefault(verse, []).append(rendered)
+        current_note = None
+
+    for line in lines:
+        normalized = _normalize_commentary_text(line)
+        if not normalized:
+            continue
+        if normalized == "WORD AND PHRASE STUDY":
+            in_word_study = True
+            continue
+        if not in_word_study:
+            continue
+        if normalized.startswith("DISCUSSION QUESTIONS"):
+            break
+
+        section_match = section_re.match(normalized)
+        if section_match:
+            store_note()
+            start_verse = int(section_match.group(1))
+            current_targets = [start_verse] if _verse_in_scope(reference, start_verse) else []
+            continue
+
+        verse_match = verse_re.match(normalized)
+        if verse_match:
+            store_note()
+            start_verse = int(verse_match.group(1))
+            end_verse = int(verse_match.group(2) or start_verse)
+            current_targets = [start_verse] if _verse_in_scope(reference, start_verse) else []
+            heading = f"{reference.chapter}:{start_verse}"
+            if end_verse > start_verse:
+                heading = f"{reference.chapter}:{start_verse}-{end_verse}"
+            current_note = CommentaryNote(heading=heading, body_parts=[verse_match.group(3)])
+            continue
+
+        if normalized.startswith("▣"):
+            store_note()
+            current_note = CommentaryNote(heading=normalized[1:].strip())
+            continue
+
+        if "SPECIAL TOPIC:" in normalized:
+            if current_note is None:
+                current_note = CommentaryNote(heading=normalized)
+            else:
+                current_note.body_parts.append(normalized)
+            continue
+
+        if normalized.startswith("NASB (UPDATED) TEXT:"):
+            store_note()
+            current_targets = []
+            current_note = None
+            continue
+
+        if current_note is not None:
+            current_note.body_parts.append(normalized)
+
+    store_note()
+    return commentary
+
+
+def _normalize_commentary_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text.replace("\u2003", " ")).strip()
+    cleaned = re.sub(r"\[\s+", "[", cleaned)
+    cleaned = re.sub(r"\s+\]", "]", cleaned)
+    return cleaned
+
+
+def _verse_in_scope(reference: Reference, verse_num: int) -> bool:
+    if reference.start_verse is None:
+        return True
+    end_verse = reference.end_verse or reference.start_verse
+    return reference.start_verse <= verse_num <= end_verse
+
+
+def add_commentary_footnotes(
+    body: str,
+    reference: Reference,
+    commentary: dict[int, list[str]],
+    style: str,
+) -> str:
+    if not commentary:
+        return body
+
+    lines = body.splitlines()
+    output: list[str] = []
+    verse_buffer: list[str] = []
+    current_verse: int | None = None
+
+    def flush() -> None:
+        if not verse_buffer:
+            return
+        output.extend(verse_buffer)
+        if current_verse is not None and commentary.get(current_verse):
+            output.extend(["", format_commentary_notes(reference, current_verse, commentary[current_verse], style), ""])
+        verse_buffer.clear()
+
+    for line in lines:
+        verse_match = re.match(r"^\s*<strong>(\d+)</strong>", line)
+        if verse_match:
+            flush()
+            current_verse = int(verse_match.group(1))
+        verse_buffer.append(line)
+
+    flush()
+    return "\n".join(output).strip()
+
+
+def format_commentary_notes(
+    reference: Reference,
+    verse_num: int,
+    notes: list[str],
+    style: str,
+) -> str:
+    header = f"FreeBibleCommentary — {reference.book_label} {reference.chapter}:{verse_num}"
+    bullet_lines = [f"- {note}" for note in notes]
+    if style == "inline":
+        return "\n".join([f"**{header}**", *bullet_lines])
+    summary = f"📖 {header} ({len(notes)} note{'s' if len(notes) != 1 else ''})"
+    return "\n".join(["<details>", f"<summary>{summary}</summary>", "", *bullet_lines, "</details>"])
 
 
 def ensure_macula_xml(reference: Reference, cache_dir: Path) -> Path:
@@ -580,6 +813,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write the assembled LLM prompt to stdout instead of calling OpenRouter",
     )
+    parser.add_argument(
+        "--footnotes",
+        action="store_true",
+        help="Append FreeBibleCommentary notes after each verse block",
+    )
+    parser.add_argument(
+        "--footnotes-style",
+        choices=("inline", "collapse"),
+        default="collapse",
+        help="Render commentary footnotes inline or inside HTML details blocks",
+    )
     return parser.parse_args()
 
 
@@ -599,6 +843,9 @@ def main() -> int:
                 raise
             print(f"Warning: API.Bible failed ({exc}), falling back to MACULA glosses.", file=sys.stderr)
             english_text = build_gloss_fallback(verse_words)
+    commentary: dict[int, list[str]] = {}
+    if args.footnotes:
+        commentary = fetch_commentary(reference)
     prompt = build_user_prompt(reference, verse_words, english_text)
 
     if args.dump_prompt:
@@ -606,6 +853,8 @@ def main() -> int:
         return 0
 
     body, usage = call_openrouter(prompt, args.model)
+    if commentary:
+        body = add_commentary_footnotes(body, reference, commentary, args.footnotes_style)
     output_path = write_output(reference, body, usage, Path(args.output_dir))
     publish_dir = resolve_publish_dir(args)
     print(output_path)
