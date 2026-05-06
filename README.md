@@ -87,6 +87,9 @@ OPENROUTER_API_KEY=...
 BIBLE_API_KEY=...
 # Preferred NASB ID:
 BIBLE_ID=a761ca71e0b3ddcf-01
+# Optional Obsidian publish destination. Defaults to:
+# /Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/Neural-orchestrator/Bible Study
+OBSIDIAN_BIBLE_STUDY_DIR="~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Neural-orchestrator/Bible Study"
 ```
 
 ### Usage
@@ -97,9 +100,12 @@ python3 ccf_diagram.py --reference "John 6:1-21"
 python3 ccf_diagram.py --reference "John 6" --model "openai/gpt-4.1-mini"
 python3 ccf_diagram.py --reference "John 6:1-14" --dump-prompt
 python3 ccf_diagram.py --reference "John 6:1-14" --english-source macula-gloss
+python3 ccf_diagram.py --reference "John 6:1-14" --publish-dir "/tmp/Bible Study"
+python3 ccf_diagram.py --reference "John 6:1-14" --publish-mode move
+python3 ccf_diagram.py --reference "John 6:1-14" --no-publish
 ```
 
-Outputs are written to `output/`.
+Outputs are always written to `output/` first, then published to the Obsidian vault copy by default at `/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/Neural-orchestrator/Bible Study`.
 
 ### Notes
 
@@ -107,3 +113,5 @@ Outputs are written to `output/`.
 - The script uses `BIBLE_ID` first, so you can pin NASB directly instead of relying on discovery.
 - If API.Bible is unavailable or your key is not authorized, `--english-source macula-gloss` uses MACULA glosses as the English source.
 - `--dump-prompt` is useful for prompt tuning before spending tokens.
+- `--publish-dir` overrides the vault destination for one run, `--publish-mode move` removes the local file after a successful publish, and `--no-publish` disables vault publishing entirely.
+- If the Obsidian/iCloud destination is unavailable, the script prints a warning to stderr and still keeps the local output as a successful run.

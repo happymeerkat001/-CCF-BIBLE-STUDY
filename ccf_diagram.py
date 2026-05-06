@@ -5,7 +5,9 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +25,10 @@ DEFAULT_MACULA_BASE_URL = (
 )
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openai/gpt-4.1-mini"
+DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
+    "/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
+    "Neural-orchestrator/Bible Study"
+)
 
 BOOK_CODE_TO_SLUG = {
     "MAT": "matthew",
@@ -508,6 +514,38 @@ def write_output(reference: Reference, body: str, usage: dict[str, Any], output_
     return output_path
 
 
+def resolve_publish_dir(args: argparse.Namespace) -> Path | None:
+    if args.no_publish:
+        return None
+    raw_publish_dir = args.publish_dir or os.getenv(
+        "OBSIDIAN_BIBLE_STUDY_DIR",
+        DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR,
+    )
+    expanded = os.path.expandvars(os.path.expanduser(raw_publish_dir))
+    return Path(expanded)
+
+
+def publish_output(src: Path, publish_dir: Path, mode: str) -> Path:
+    publish_dir.mkdir(parents=True, exist_ok=True)
+    destination = publish_dir / src.name
+    fd, temp_name = tempfile.mkstemp(prefix=f".{src.stem}.", suffix=src.suffix, dir=publish_dir)
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        shutil.copy2(src, temp_path)
+        os.replace(temp_path, destination)
+        if mode == "move":
+            src.unlink()
+        return destination
+    except Exception:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate English sentence diagrams from MACULA Greek syntax and API.Bible text."
@@ -516,6 +554,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenRouter model name")
     parser.add_argument("--data-dir", default="data", help="Local cache directory for MACULA XML")
     parser.add_argument("--output-dir", default="output", help="Directory for rendered Markdown")
+    parser.add_argument(
+        "--publish-dir",
+        help="Directory for the published Markdown copy (defaults to OBSIDIAN_BIBLE_STUDY_DIR)",
+    )
+    parser.add_argument(
+        "--publish-mode",
+        choices=("copy", "move"),
+        default="copy",
+        help="Publish behavior after local write",
+    )
+    parser.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="Skip publishing to the Obsidian vault",
+    )
     parser.add_argument(
         "--english-source",
         choices=("auto", "api-bible", "macula-gloss"),
@@ -554,7 +607,17 @@ def main() -> int:
 
     body, usage = call_openrouter(prompt, args.model)
     output_path = write_output(reference, body, usage, Path(args.output_dir))
+    publish_dir = resolve_publish_dir(args)
     print(output_path)
+    if publish_dir is not None:
+        try:
+            published_path = publish_output(output_path, publish_dir, args.publish_mode)
+            print(published_path)
+        except OSError as exc:
+            print(
+                f"Warning: could not publish {output_path.name} to {publish_dir} ({exc}).",
+                file=sys.stderr,
+            )
     return 0
 
 
