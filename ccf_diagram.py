@@ -28,6 +28,7 @@ DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324"
 DEFAULT_FALLBACK_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
+DEFAULT_NET_BIBLE_NOTES_URL = "https://labs.bible.org/api/"
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
     "/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
     "Neural-orchestrator/Bible Study"
@@ -78,6 +79,65 @@ ALLOWED_PREPOSITION_TEXT = {
     "toward",
     "towards",
     "out of",
+}
+COMMON_FUNCTION_LEMMAS = {
+    "ὁ",
+    "καί",
+    "δέ",
+    "γάρ",
+    "οὖν",
+    "ἐν",
+    "εἰς",
+    "ἐκ",
+    "ἀπό",
+    "πρός",
+    "διά",
+    "μετά",
+    "παρά",
+    "ὑπό",
+    "περί",
+    "ἀντί",
+    "ἐπί",
+    "σύν",
+    "ἀλλά",
+    "ἵνα",
+    "ὅτι",
+    "ὅς",
+    "ὅς/ὅ",
+    "ἐγώ",
+    "σύ",
+    "αὐτός",
+    "οὐ",
+    "μή",
+    "εἰμί",
+}
+COMMON_FUNCTION_SURFACES = ALLOWED_MARK_TEXT | ALLOWED_PREPOSITION_TEXT | {
+    "the",
+    "a",
+    "an",
+    "is",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "he",
+    "she",
+    "it",
+    "they",
+    "him",
+    "his",
+    "her",
+    "their",
+    "this",
+    "that",
+    "these",
+    "those",
+    "as",
+    "or",
+    "not",
+    "also",
+    "all",
 }
 
 BOOK_CODE_TO_SLUG = {
@@ -231,6 +291,30 @@ class CommentaryNote:
         return f"{heading} {body}".strip() if body else heading
 
 
+@dataclass
+class CommentarySource:
+    key: str
+    label: str
+    emoji: str
+    notes: dict[int, list[str]]
+
+
+@dataclass
+class BoldWord:
+    verse: int
+    surface: str
+    lemma: str
+    gloss: str
+
+
+COMMENTARY_SOURCE_METADATA = {
+    "fbc": {"label": "FreeBibleCommentary — Utley", "emoji": "📖"},
+    "net": {"label": "NET Bible Notes", "emoji": "📗"},
+    "pentecost": {"label": "Words & Works of Jesus — Pentecost", "emoji": "✝️"},
+    "keener": {"label": "IVP Bible Background — Keener", "emoji": "🌍"},
+}
+
+
 def load_dotenv(path: Path = Path(".env")) -> None:
     if not path.exists():
         return
@@ -345,6 +429,16 @@ def fetch_commentary(reference: Reference) -> dict[int, list[str]]:
     )
     lines = extract_fbc_text_lines(html_text, url)
     return parse_fbc_commentary_lines(reference, lines)
+
+
+def fetch_fbc_commentary_source(reference: Reference) -> CommentarySource:
+    meta = COMMENTARY_SOURCE_METADATA["fbc"]
+    return CommentarySource(
+        key="fbc",
+        label=meta["label"],
+        emoji=meta["emoji"],
+        notes=fetch_commentary(reference),
+    )
 
 
 def extract_fbc_text_lines(raw_html: str, base_url: str) -> list[str]:
@@ -467,13 +561,325 @@ def _verse_in_scope(reference: Reference, verse_num: int) -> bool:
     return reference.start_verse <= verse_num <= end_verse
 
 
+def parse_requested_commentary_sources(raw: str) -> list[str]:
+    if not raw:
+        return ["fbc"]
+    requested = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    if not requested:
+        return ["fbc"]
+    if "all" in requested:
+        return list(COMMENTARY_SOURCE_METADATA)
+    invalid = [item for item in requested if item not in COMMENTARY_SOURCE_METADATA]
+    if invalid:
+        raise DiagramError(
+            "Unknown commentary source(s): "
+            + ", ".join(sorted(invalid))
+            + ". Use fbc, net, pentecost, keener, or all."
+        )
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in requested:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
+
+
+def fetch_net_bible_notes(reference: Reference) -> CommentarySource:
+    params = {
+        "passage": reference.verse_range_label,
+        "type": "json",
+        "formatting": "full",
+        "notes": "1",
+        "footnotes": "1",
+    }
+    url = f"{DEFAULT_NET_BIBLE_NOTES_URL}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "CCF Bible Study Diagram Generator/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise DiagramError(f"HTTP {exc.code} from {url}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise DiagramError(f"Network error for {url}: {exc}") from exc
+
+    notes: dict[int, list[str]] = {}
+    for item in payload:
+        verse_num = int(item.get("verse", 0) or 0)
+        if not verse_num or not _verse_in_scope(reference, verse_num):
+            continue
+        rendered = _extract_net_notes_from_payload(item)
+        if rendered:
+            notes[verse_num] = rendered
+
+    meta = COMMENTARY_SOURCE_METADATA["net"]
+    return CommentarySource(
+        key="net",
+        label=meta["label"],
+        emoji=meta["emoji"],
+        notes=notes,
+    )
+
+
+def _extract_net_notes_from_payload(item: dict[str, Any]) -> list[str]:
+    structured_notes = item.get("notes")
+    if isinstance(structured_notes, list):
+        rendered = [_normalize_commentary_text(_flatten_note_value(note)) for note in structured_notes]
+        return [note for note in rendered if note]
+
+    structured_footnotes = item.get("footnotes")
+    if isinstance(structured_footnotes, list):
+        rendered = [
+            _normalize_commentary_text(_flatten_note_value(note))
+            for note in structured_footnotes
+        ]
+        return [note for note in rendered if note]
+
+    text = html.unescape(str(item.get("text", "")))
+    note_blocks = re.findall(r"(?is)<(?:note|sn|tn|tc)\b[^>]*>(.*?)</(?:note|sn|tn|tc)>", text)
+    cleaned_blocks = [_normalize_net_note_html(block) for block in note_blocks]
+    cleaned_blocks = [block for block in cleaned_blocks if block]
+    if cleaned_blocks:
+        return cleaned_blocks
+
+    marker_matches = list(re.finditer(r'<n\s+id="([^"]+)"\s*/?>', text))
+    if not marker_matches:
+        return []
+
+    plain_text = _normalize_net_note_html(text)
+    snippets: list[str] = []
+    for index, match in enumerate(marker_matches, start=1):
+        note_id = match.group(1) or str(index)
+        prefix = _normalize_net_note_html(text[: match.start()])
+        suffix = _normalize_net_note_html(text[match.end() :])
+        context_bits = [part for part in (prefix[-80:].strip(), suffix[:80].strip()) if part]
+        context = " ... ".join(context_bits).strip()
+        if context:
+            snippets.append(f"Note {note_id} attached to: {context}")
+        elif plain_text:
+            snippets.append(f"Note {note_id} attached to: {plain_text[:120]}")
+    return snippets
+
+
+def _flatten_note_value(value: Any) -> str:
+    if isinstance(value, str):
+        return _normalize_net_note_html(value)
+    if isinstance(value, dict):
+        pieces = []
+        for key in ("text", "body", "note", "content", "value", "type"):
+            if value.get(key):
+                pieces.append(_flatten_note_value(value[key]))
+        return " ".join(piece for piece in pieces if piece)
+    if isinstance(value, list):
+        return " ".join(_flatten_note_value(item) for item in value)
+    return str(value)
+
+
+def _normalize_net_note_html(text: str) -> str:
+    text = re.sub(r"(?is)<st\b[^>]*>(.*?)</st>", r"\1", text)
+    text = re.sub(r"(?is)<n\b[^>]*/?>", " ", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return _normalize_commentary_text(html.unescape(text))
+
+
+def load_pdf_commentary(reference: Reference, key: str, cache_dir: Path) -> CommentarySource:
+    if key not in COMMENTARY_SOURCE_METADATA:
+        raise DiagramError(f"Unknown commentary source: {key}")
+    index_path = cache_dir / f"{key}_{reference.book_slug}.json"
+    if not index_path.exists():
+        raise DiagramError(
+            f"Missing commentary index for {key}: {index_path}. "
+            "Run: python3 index_commentary_pdf.py "
+            f"--pdf /path/to/{key}.pdf --book {reference.book_slug} --key {key}"
+        )
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    notes: dict[int, list[str]] = {}
+    for verse_key, entries in payload.items():
+        match = re.fullmatch(r"(\d+):(\d+)", verse_key.strip())
+        if not match:
+            continue
+        chapter_num = int(match.group(1))
+        verse_num = int(match.group(2))
+        if chapter_num != reference.chapter or not _verse_in_scope(reference, verse_num):
+            continue
+        if isinstance(entries, str):
+            rendered = [_normalize_commentary_text(entries)]
+        else:
+            rendered = [_normalize_commentary_text(str(entry)) for entry in entries]
+        rendered = [entry for entry in rendered if entry]
+        if rendered:
+            notes[verse_num] = rendered
+    meta = COMMENTARY_SOURCE_METADATA[key]
+    return CommentarySource(key=key, label=meta["label"], emoji=meta["emoji"], notes=notes)
+
+
+def load_bdag_index(cache_dir: Path) -> dict[str, str]:
+    index_path = cache_dir / "bdag_index.json"
+    if not index_path.exists():
+        raise DiagramError(f"Missing BDAG index: {index_path}. Run index_bdag.py first.")
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    return {
+        _normalize_lemma_lookup(str(lemma)): str(definition).strip()
+        for lemma, definition in payload.items()
+        if str(lemma).strip() and str(definition).strip()
+    }
+
+
+def identify_bold_words(
+    verse_words: dict[int, list[WordEntry]],
+    bdag_index: dict[str, str],
+) -> dict[int, list[BoldWord]]:
+    bold_map: dict[int, list[BoldWord]] = {}
+    for verse_num, words in verse_words.items():
+        seen: set[tuple[str, str]] = set()
+        for word in words:
+            lemma = _normalize_lemma_lookup(word.lemma)
+            if not lemma or lemma not in bdag_index:
+                continue
+            if _is_common_function_word(word, lemma):
+                continue
+            surface = _choose_bold_surface(word)
+            if not surface:
+                continue
+            normalized_surface = normalize_marker_text(surface)
+            if not normalized_surface or normalized_surface in COMMON_FUNCTION_SURFACES:
+                continue
+            key = (normalized_surface, lemma)
+            if key in seen:
+                continue
+            seen.add(key)
+            bold_map.setdefault(verse_num, []).append(
+                BoldWord(
+                    verse=verse_num,
+                    surface=surface,
+                    lemma=lemma,
+                    gloss=_trim_definition_snippet(bdag_index[lemma]),
+                )
+            )
+    return bold_map
+
+
+def _normalize_lemma_lookup(lemma: str) -> str:
+    cleaned = html.unescape(lemma or "").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"/\d+$", "", cleaned)
+    cleaned = re.sub(r"[0-9]+$", "", cleaned)
+    return cleaned
+
+
+def _is_common_function_word(word: WordEntry, lemma: str) -> bool:
+    if lemma in COMMON_FUNCTION_LEMMAS:
+        return True
+    if word.word_class.lower() in {"det", "article", "prep", "conj", "ptcl", "pron"}:
+        return True
+    english = normalize_marker_text(word.english or word.gloss or "")
+    return english in COMMON_FUNCTION_SURFACES
+
+
+def _choose_bold_surface(word: WordEntry) -> str:
+    candidates = [word.english, word.gloss, word.text]
+    for candidate in candidates:
+        text = _normalize_candidate_surface(candidate)
+        if text:
+            return text
+    return ""
+
+
+def _normalize_candidate_surface(value: str) -> str:
+    text = html.unescape((value or "").strip())
+    if not text:
+        return ""
+    text = re.sub(r"\[[^\]]+\]", "", text)
+    text = re.split(r"[;/]", text, maxsplit=1)[0]
+    text = re.sub(r"\s+", " ", text).strip(" ,.;:!?()[]{}\"'“”‘’")
+    return text
+
+
+def _trim_definition_snippet(definition: str, limit: int = 200) -> str:
+    cleaned = re.sub(r"\s+", " ", definition).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "…"
+
+
+def apply_bold_words(body: str, bold_words: dict[int, list[BoldWord]]) -> str:
+    if not bold_words:
+        return body
+
+    lines = body.splitlines()
+    output: list[str] = []
+    verse_buffer: list[str] = []
+    current_verse: int | None = None
+
+    def flush() -> None:
+        if not verse_buffer:
+            return
+        verse_text = "\n".join(verse_buffer)
+        if current_verse is not None and bold_words.get(current_verse):
+            verse_text = _apply_bold_words_to_verse_block(verse_text, bold_words[current_verse])
+        output.append(verse_text)
+        verse_buffer.clear()
+
+    for line in lines:
+        verse_match = re.match(r"^\s*<strong>(\d+)</strong>", line)
+        if verse_match:
+            flush()
+            current_verse = int(verse_match.group(1))
+        verse_buffer.append(line)
+
+    flush()
+    return "\n".join(output).strip()
+
+
+def _apply_bold_words_to_verse_block(block: str, bold_words: list[BoldWord]) -> str:
+    updated = block
+    for bold_word in sorted(bold_words, key=lambda item: (-len(item.surface), item.surface.lower())):
+        updated = _wrap_surface_in_bold(updated, bold_word.surface)
+    return updated
+
+
+def _wrap_surface_in_bold(block: str, surface: str) -> str:
+    if not surface:
+        return block
+    phrase_pattern = _build_surface_pattern(surface)
+    if not phrase_pattern:
+        return block
+
+    for tag in ("u", "mark", "span", "em", "i"):
+        tag_pattern = re.compile(
+            rf"(?<!<b>)(<{tag}\b[^>]*>\s*{phrase_pattern}\s*</{tag}>)",
+            re.IGNORECASE,
+        )
+        wrapped, count = tag_pattern.subn(r"<b>\1</b>", block, count=1)
+        if count:
+            return wrapped
+
+    plain_pattern = re.compile(
+        rf"(?<![A-Za-z])({phrase_pattern})(?![A-Za-z])",
+        re.IGNORECASE,
+    )
+    wrapped, count = plain_pattern.subn(r"<b>\1</b>", block, count=1)
+    return wrapped if count else block
+
+
+def _build_surface_pattern(surface: str) -> str:
+    parts = [part for part in re.split(r"\s+", surface.strip()) if part]
+    if not parts:
+        return ""
+    return r"(?:\s|\u00A0|&nbsp;)+".join(re.escape(part) for part in parts)
+
+
 def add_commentary_footnotes(
     body: str,
     reference: Reference,
-    commentary: dict[int, list[str]],
+    sources: list[CommentarySource],
     style: str,
 ) -> str:
-    if not commentary:
+    if not sources:
         return body
 
     lines = body.splitlines()
@@ -485,8 +891,19 @@ def add_commentary_footnotes(
         if not verse_buffer:
             return
         output.extend(verse_buffer)
-        if current_verse is not None and commentary.get(current_verse):
-            output.extend(["", format_commentary_notes(reference, current_verse, commentary[current_verse], style), ""])
+        if current_verse is not None:
+            verse_notes = [
+                CommentarySource(
+                    key=source.key,
+                    label=source.label,
+                    emoji=source.emoji,
+                    notes={current_verse: source.notes.get(current_verse, [])},
+                )
+                for source in sources
+                if source.notes.get(current_verse)
+            ]
+            if verse_notes:
+                output.extend(["", format_verse_commentary(reference, current_verse, verse_notes, style), ""])
         verse_buffer.clear()
 
     for line in lines:
@@ -501,17 +918,45 @@ def add_commentary_footnotes(
 
 
 def format_commentary_notes(
-    reference: Reference,
+    source: CommentarySource,
     verse_num: int,
-    notes: list[str],
     style: str,
 ) -> str:
-    header = f"FreeBibleCommentary — {reference.book_label} {reference.chapter}:{verse_num}"
+    notes = source.notes.get(verse_num, [])
+    count = len(notes)
+    summary = f"{source.emoji} {source.label} ({count} note{'s' if count != 1 else ''})"
     bullet_lines = [f"- {note}" for note in notes]
     if style == "inline":
-        return "\n".join([f"**{header}**", *bullet_lines])
-    summary = f"📖 {header} ({len(notes)} note{'s' if len(notes) != 1 else ''})"
+        return "\n".join([f"**{summary}**", *bullet_lines])
     return "\n".join(["<details>", f"<summary>{summary}</summary>", "", *bullet_lines, "</details>"])
+
+
+def format_verse_commentary(
+    reference: Reference,
+    verse_num: int,
+    sources: list[CommentarySource],
+    style: str,
+) -> str:
+    header = f"Commentary — {reference.book_label} {reference.chapter}:{verse_num}"
+    if style == "inline":
+        parts = [f"**{header}**"]
+        for source in sources:
+            rendered = format_commentary_notes(source, verse_num, style)
+            if rendered:
+                parts.extend(["", rendered])
+        return "\n".join(parts)
+
+    inner_blocks = [format_commentary_notes(source, verse_num, style) for source in sources]
+    inner_blocks = [block for block in inner_blocks if block]
+    return "\n".join(
+        [
+            "<details>",
+            f"<summary><strong>{header}</strong></summary>",
+            "",
+            *inner_blocks,
+            "</details>",
+        ]
+    )
 
 
 def ensure_macula_xml(reference: Reference, cache_dir: Path) -> Path:
@@ -674,6 +1119,15 @@ def split_bible_text(reference: Reference, content: str) -> dict[int, str]:
     if reference.start_verse is not None and reference.start_verse == reference.end_verse:
         return {reference.start_verse: cleaned}
     return {}
+
+
+def sanitize_english_text(verses: dict[int, str]) -> dict[int, str]:
+    cleaned: dict[int, str] = {}
+    for verse_num, text in verses.items():
+        normalized = text.replace("*", "").replace("_", "")
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        cleaned[verse_num] = normalized
+    return cleaned
 
 
 def simplify_macula(reference: Reference, verse_words: dict[int, list[WordEntry]]) -> list[dict[str, Any]]:
@@ -950,7 +1404,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate English sentence diagrams from MACULA Greek syntax and API.Bible text."
     )
-    parser.add_argument("--reference", required=True, help='Example: "John 6" or "John 6:1-21"')
+    parser.add_argument("reference_arg", nargs="?", help='Example: "John 6" or "John 6:1-21"')
+    parser.add_argument("--reference", help='Example: "John 6" or "John 6:1-21"')
     parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenRouter model name")
     parser.add_argument("--data-dir", default="data", help="Local cache directory for MACULA XML")
     parser.add_argument("--output-dir", default="output", help="Directory for rendered Markdown")
@@ -983,7 +1438,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--footnotes",
         action="store_true",
-        help="Append FreeBibleCommentary notes after each verse block",
+        help="Append commentary notes after each verse block",
     )
     parser.add_argument(
         "--footnotes-style",
@@ -991,14 +1446,29 @@ def parse_args() -> argparse.Namespace:
         default="collapse",
         help="Render commentary footnotes inline or inside HTML details blocks",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--commentary-sources",
+        default="fbc",
+        help="Comma-separated commentary sources: fbc, net, pentecost, keener, or all",
+    )
+    parser.add_argument(
+        "--bold-words",
+        action="store_true",
+        help="Bold lexically significant Greek-linked words in the diagram output",
+    )
+    args = parser.parse_args()
+    args.reference = args.reference or args.reference_arg
+    if not args.reference:
+        parser.error("reference is required")
+    return args
 
 
 def main() -> int:
     load_dotenv()
     args = parse_args()
     reference = parse_reference(args.reference)
-    xml_path = ensure_macula_xml(reference, Path(args.data_dir))
+    data_dir = Path(args.data_dir)
+    xml_path = ensure_macula_xml(reference, data_dir)
     verse_words = extract_macula_words(xml_path, reference)
     if args.english_source == "macula-gloss":
         english_text = build_gloss_fallback(verse_words)
@@ -1010,9 +1480,21 @@ def main() -> int:
                 raise
             print(f"Warning: API.Bible failed ({exc}), falling back to MACULA glosses.", file=sys.stderr)
             english_text = build_gloss_fallback(verse_words)
-    commentary: dict[int, list[str]] = {}
+    english_text = sanitize_english_text(english_text)
+    bdag_index: dict[str, str] = {}
+    if args.bold_words:
+        bdag_index = load_bdag_index(data_dir)
+
+    commentary_sources: list[CommentarySource] = []
     if args.footnotes:
-        commentary = fetch_commentary(reference)
+        requested_sources = parse_requested_commentary_sources(args.commentary_sources)
+        for key in requested_sources:
+            if key == "fbc":
+                commentary_sources.append(fetch_fbc_commentary_source(reference))
+            elif key == "net":
+                commentary_sources.append(fetch_net_bible_notes(reference))
+            else:
+                commentary_sources.append(load_pdf_commentary(reference, key, data_dir))
     prompt = build_user_prompt(reference, verse_words, english_text)
 
     if args.dump_prompt:
@@ -1020,11 +1502,13 @@ def main() -> int:
         return 0
 
     body, usage = generate_validated_diagram(prompt, args.model)
+    if bdag_index:
+        body = apply_bold_words(body, identify_bold_words(verse_words, bdag_index))
     # Obsidian Live Preview does not consistently render HTML entities like `&nbsp;`.
     # Convert them to real NBSP characters so indentation displays correctly while editing.
     body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
-    if commentary:
-        body = add_commentary_footnotes(body, reference, commentary, args.footnotes_style)
+    if commentary_sources:
+        body = add_commentary_footnotes(body, reference, commentary_sources, args.footnotes_style)
     output_path = write_output(reference, body, usage, Path(args.output_dir))
     publish_dir = resolve_publish_dir(args)
     print(output_path)

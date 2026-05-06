@@ -6,6 +6,8 @@ This folder contains scripts for CCF Bible study preparation.
 
 - `ccf_preview_message.py`
 - `ccf_diagram.py`
+- `index_bdag.py`
+- `index_commentary_pdf.py`
 
 ## Reminder message workflow
 
@@ -95,19 +97,89 @@ OBSIDIAN_BIBLE_STUDY_DIR="~/Library/Mobile Documents/iCloud~md~obsidian/Document
 ### Usage
 
 ```bash
-python3 ccf_diagram.py --reference "John 6"
-python3 ccf_diagram.py --reference "John 6:1-21"
-python3 ccf_diagram.py --reference "John 6" --model "deepseek/deepseek-chat-v3-0324"
-python3 ccf_diagram.py --reference "John 6:1-14" --dump-prompt
-python3 ccf_diagram.py --reference "John 6:1-14" --english-source macula-gloss
-python3 ccf_diagram.py --reference "John 12:20-50" --footnotes
-python3 ccf_diagram.py --reference "John 12:20-50" --footnotes --footnotes-style inline
-python3 ccf_diagram.py --reference "John 6:1-14" --publish-dir "/tmp/Bible Study"
-python3 ccf_diagram.py --reference "John 6:1-14" --publish-mode move
-python3 ccf_diagram.py --reference "John 6:1-14" --no-publish
+python3 ccf_diagram.py "John 6"
+python3 ccf_diagram.py "John 6:1-21"
+python3 ccf_diagram.py "John 6" --model "deepseek/deepseek-chat-v3-0324"
+python3 ccf_diagram.py "John 6:1-14" --dump-prompt
+python3 ccf_diagram.py "John 6:1-14" --english-source macula-gloss
+python3 ccf_diagram.py "John 12:20-50" --footnotes
+python3 ccf_diagram.py "John 12:20-50" --footnotes --footnotes-style inline
+python3 ccf_diagram.py "John 6:1-14" --publish-dir "/tmp/Bible Study"
+python3 ccf_diagram.py "John 6:1-14" --publish-mode move
+python3 ccf_diagram.py "John 6:1-14" --no-publish
 ```
 
 Outputs are always written to `output/` first, then published to the Obsidian vault copy by default at `/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/Neural-orchestrator/Bible Study`.
+
+### Main command: diagram + commentary + word study
+
+If you want the full output for a passage, including:
+
+- the sentence diagram
+- foldable commentary blocks
+- bolded Greek-linked word-study terms
+
+run:
+
+```bash
+  python3 ccf_diagram.py "John 13:1-30" \
+    --footnotes \
+    --commentary-sources fbc,net \
+    --bold-words
+```
+
+If you only want the built-in web sources for now:
+
+```bash
+python3 ccf_diagram.py "John 6:1-5" \
+  --footnotes \
+  --commentary-sources fbc,net \
+  --bold-words
+```
+
+If you want every configured source:
+
+```bash
+python3 ccf_diagram.py "John 6:1-5" \
+  --footnotes \
+  --commentary-sources all \
+  --bold-words
+```
+
+`--footnotes` is the master switch for commentary output. `--bold-words` is independent and requires a local BDAG index.
+
+### One-time indexing commands
+
+Before using `--bold-words`, build the BDAG index once:
+
+```bash
+python3 index_bdag.py --url "https://example.com/path/to/bdag.pdf"
+```
+
+You can also provide the URL through `BDAG_PDF_URL`:
+
+```bash
+BDAG_PDF_URL="https://example.com/path/to/bdag.pdf" python3 index_bdag.py
+```
+
+This writes:
+
+- `data/bdag.pdf`
+- `data/bdag_index.json`
+
+Before using local PDF commentary sources such as `pentecost` or `keener`, build each book index once:
+
+```bash
+python3 index_commentary_pdf.py --pdf "/real/path/to/pentecost.pdf" --book john --key pentecost
+python3 index_commentary_pdf.py --pdf "/real/path/to/keener.pdf" --book john --key keener
+```
+
+This writes files such as:
+
+- `data/pentecost_john.json`
+- `data/keener_john.json`
+
+Use a real PDF path. `path/to/...` in examples is a placeholder, so the command will fail until the PDF exists at that location. Run scripts with `python3 script_name.py` from this folder, or `./script_name.py` only after making the script executable and using the `./` prefix.
 
 ### Notes
 
@@ -115,6 +187,11 @@ Outputs are always written to `output/` first, then published to the Obsidian va
 - The script uses `BIBLE_ID` first, so you can pin NASB directly instead of relying on discovery.
 - If API.Bible is unavailable or your key is not authorized, `--english-source macula-gloss` uses MACULA glosses as the English source.
 - `--dump-prompt` is useful for prompt tuning before spending tokens.
-- `--footnotes` appends Dr. Bob Utley's FreeBibleCommentary notes per verse; `--footnotes-style collapse` (default) uses `<details>` blocks for Obsidian-friendly folding.
+- `--footnotes` appends commentary after each verse block.
+- `--commentary-sources` accepts `fbc`, `net`, `pentecost`, `keener`, or `all`.
+- `--footnotes-style collapse` is the default and renders nested `<details>` blocks: one outer block per verse, then one inner block per commentary source.
+- `--footnotes` with no `--commentary-sources` uses `fbc` by default for backward compatibility.
+- `--bold-words` bolds lexically significant Greek-linked English terms inside the generated diagram and requires `data/bdag_index.json`.
+- The `net` source currently depends on what `labs.bible.org` exposes for the requested passage; if only note markers are available, the output may fall back to marker-context snippets instead of full note bodies.
 - `--publish-dir` overrides the vault destination for one run, `--publish-mode move` removes the local file after a successful publish, and `--no-publish` disables vault publishing entirely.
 - If the Obsidian/iCloud destination is unavailable, the script prints a warning to stderr and still keeps the local output as a successful run.
