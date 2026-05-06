@@ -1,12 +1,13 @@
-# CCF Bible Study Reminder Generator
+# CCF Bible Study Tools
 
-This folder contains a script that generates a Chinese CCF reminder message and resolves the next week's `Note`, `Lecture`, `Questions`, and `Answers` links from Google Drive.
+This folder contains scripts for CCF Bible study preparation.
 
-## File
+## Files
 
 - `ccf_preview_message.py`
+- `ccf_diagram.py`
 
-## Supported workflow
+## Reminder message workflow
 
 Use a Bible reference plus last week's lesson code:
 
@@ -68,3 +69,41 @@ python3 ccf_preview_message.py \
 - `--previous-lesson` is required.
 - The script assumes this week's files are the next lesson, for example `L15 -> L16`.
 - The script requires internet access because it reads the public Google Drive pages at runtime.
+
+## Diagram workflow
+
+`ccf_diagram.py` builds an English sentence-diagram draft by combining:
+
+- MACULA Greek syntax trees cached under `data/`
+- API.Bible verse text
+- OpenRouter for English clause mapping and HTML formatting
+
+### Environment
+
+Store secrets in `.env`:
+
+```bash
+OPENROUTER_API_KEY=...
+BIBLE_API_KEY=...
+# Preferred NASB ID:
+BIBLE_ID=a761ca71e0b3ddcf-01
+```
+
+### Usage
+
+```bash
+python3 ccf_diagram.py --reference "John 6"
+python3 ccf_diagram.py --reference "John 6:1-21"
+python3 ccf_diagram.py --reference "John 6" --model "openai/gpt-4.1-mini"
+python3 ccf_diagram.py --reference "John 6:1-14" --dump-prompt
+python3 ccf_diagram.py --reference "John 6:1-14" --english-source macula-gloss
+```
+
+Outputs are written to `output/`.
+
+### Notes
+
+- The first run downloads the MACULA XML file for the requested book and caches it under `data/`.
+- The script uses `BIBLE_ID` first, so you can pin NASB directly instead of relying on discovery.
+- If API.Bible is unavailable or your key is not authorized, `--english-source macula-gloss` uses MACULA glosses as the English source.
+- `--dump-prompt` is useful for prompt tuning before spending tokens.
