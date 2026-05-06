@@ -25,7 +25,7 @@ DEFAULT_MACULA_BASE_URL = (
     "Nestle1904/lowfat"
 )
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "openai/gpt-4.1-mini"
+DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324"
 DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
     "/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
@@ -736,6 +736,11 @@ def write_output(reference: Reference, body: str, usage: dict[str, Any], output_
         )
 
     output = [
+        "---",
+        "cssclasses:",
+        "  - ccf-diagram",
+        "---",
+        "",
         f"# {reference.verse_range_label}",
         "",
         body.strip(),
@@ -853,6 +858,9 @@ def main() -> int:
         return 0
 
     body, usage = call_openrouter(prompt, args.model)
+    # Obsidian Live Preview does not consistently render HTML entities like `&nbsp;`.
+    # Convert them to real NBSP characters so indentation displays correctly while editing.
+    body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
     if commentary:
         body = add_commentary_footnotes(body, reference, commentary, args.footnotes_style)
     output_path = write_output(reference, body, usage, Path(args.output_dir))

@@ -97,7 +97,7 @@ OBSIDIAN_BIBLE_STUDY_DIR="~/Library/Mobile Documents/iCloud~md~obsidian/Document
 ```bash
 python3 ccf_diagram.py --reference "John 6"
 python3 ccf_diagram.py --reference "John 6:1-21"
-python3 ccf_diagram.py --reference "John 6" --model "openai/gpt-4.1-mini"
+python3 ccf_diagram.py --reference "John 6" --model "deepseek/deepseek-chat-v3-0324"
 python3 ccf_diagram.py --reference "John 6:1-14" --dump-prompt
 python3 ccf_diagram.py --reference "John 6:1-14" --english-source macula-gloss
 python3 ccf_diagram.py --reference "John 12:20-50" --footnotes
