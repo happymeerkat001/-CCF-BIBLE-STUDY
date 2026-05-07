@@ -1147,7 +1147,6 @@ def simplify_macula(reference: Reference, verse_words: dict[int, list[WordEntry]
                         "role": word.role,
                         "english": word.english,
                         "depth": word.depth,
-                        "groups": word.groups,
                     }
                     for word in words
                 ],
@@ -1175,9 +1174,9 @@ def build_user_prompt(
     return (
         f"Reference: {reference.verse_range_label}\n\n"
         "English verses:\n"
-        f"{json.dumps(english_payload, ensure_ascii=False, indent=2)}\n\n"
+        f"{json.dumps(english_payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "Greek syntax payload:\n"
-        f"{json.dumps(syntax_payload, ensure_ascii=False, indent=2)}\n"
+        f"{json.dumps(syntax_payload, ensure_ascii=False, separators=(',', ':'))}\n"
     )
 
 
@@ -1282,6 +1281,45 @@ def validate_diagram_body(body: str) -> list[str]:
     return unique_errors
 
 
+def autofix_diagram_body(body: str) -> str:
+    """Fix common mechanical validation issues without an LLM round-trip."""
+    # Strip preamble before first verse number
+    match = re.search(r"<strong>\d+</strong>", body)
+    if match and match.start() > 0:
+        body = body[match.start():]
+
+    # Fix bare <mark> tags (no style) → default to yellow background
+    body = re.sub(r"<mark>", '<mark style="background: yellow;">', body)
+
+    # Fix <mark style="color: red;"> → convert to <span>
+    body = re.sub(
+        r'<mark\s+style="color:\s*red;">(.*?)</mark>',
+        r'<span style="color: red;">\1</span>',
+        body,
+        flags=re.DOTALL,
+    )
+
+    # Fix background: red → background: salmon
+    body = body.replace("background: red", "background: salmon")
+
+    # Fix disallowed background colors → salmon fallback
+    def _fix_mark_bg(m: re.Match[str]) -> str:
+        style = m.group(1)
+        bg_match = re.search(r"background:\s*([^;\"]+)", style)
+        if bg_match:
+            bg = bg_match.group(1).strip()
+            if bg not in ALLOWED_MARK_BACKGROUNDS:
+                style = style.replace(f"background: {bg}", "background: salmon")
+        return f'<mark style="{style}">'
+    body = re.sub(r'<mark\s+style="([^"]*)">', _fix_mark_bg, body)
+
+    # Strip trailing markdown code fences the LLM sometimes wraps output in
+    body = re.sub(r"^```[a-z]*\s*\n?", "", body)
+    body = re.sub(r"\n?```\s*$", "", body)
+
+    return body
+
+
 def build_repair_prompt(original_prompt: str, draft_body: str, errors: list[str]) -> str:
     repair_lines = "\n".join(f"- {error}" for error in errors)
     return (
@@ -1299,6 +1337,7 @@ def build_repair_prompt(original_prompt: str, draft_body: str, errors: list[str]
 
 def generate_validated_diagram(prompt: str, model: str, max_attempts: int = 3) -> tuple[str, dict[str, Any]]:
     body, usage = call_openrouter(prompt, model)
+    body = autofix_diagram_body(body)
     errors = validate_diagram_body(body)
     if not errors:
         return body, usage
@@ -1307,6 +1346,7 @@ def generate_validated_diagram(prompt: str, model: str, max_attempts: int = 3) -
     for _ in range(max_attempts - 1):
         repair_prompt = build_repair_prompt(prompt, body, errors)
         body, repair_usage = call_openrouter(repair_prompt, model)
+        body = autofix_diagram_body(body)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total_usage[key] = total_usage.get(key, 0) + repair_usage.get(key, 0)
         errors = validate_diagram_body(body)
@@ -1320,6 +1360,7 @@ def generate_validated_diagram(prompt: str, model: str, max_attempts: int = 3) -
             file=sys.stderr,
         )
         body, fallback_usage = call_openrouter(prompt, fallback_model)
+        body = autofix_diagram_body(body)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total_usage[key] = total_usage.get(key, 0) + fallback_usage.get(key, 0)
         errors = validate_diagram_body(body)
@@ -1329,6 +1370,7 @@ def generate_validated_diagram(prompt: str, model: str, max_attempts: int = 3) -
         for _ in range(max_attempts - 1):
             repair_prompt = build_repair_prompt(prompt, body, errors)
             body, repair_usage = call_openrouter(repair_prompt, fallback_model)
+            body = autofix_diagram_body(body)
             for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 total_usage[key] = total_usage.get(key, 0) + repair_usage.get(key, 0)
             errors = validate_diagram_body(body)
@@ -1400,6 +1442,37 @@ def publish_output(src: Path, publish_dir: Path, mode: str) -> Path:
         raise
 
 
+DIAGRAM_CACHE_DIR = Path("data/diagram_cache")
+
+
+def _cache_key(reference: Reference, model: str) -> Path:
+    slug = f"{reference.book_slug}_{reference.chapter}"
+    v_start = reference.start_verse or 1
+    v_end = reference.end_verse or v_start
+    safe_model = re.sub(r"[^a-zA-Z0-9._-]", "_", model)
+    return DIAGRAM_CACHE_DIR / slug / f"v{v_start}-{v_end}_{safe_model}.json"
+
+
+def load_cached_diagram(reference: Reference, model: str) -> tuple[str, dict[str, Any]] | None:
+    path = _cache_key(reference, model)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data["body"], data.get("usage", {})
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def save_cached_diagram(reference: Reference, model: str, body: str, usage: dict[str, Any]) -> None:
+    path = _cache_key(reference, model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"body": body, "usage": usage}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate English sentence diagrams from MACULA Greek syntax and API.Bible text."
@@ -1455,6 +1528,11 @@ def parse_args() -> argparse.Namespace:
         "--bold-words",
         action="store_true",
         help="Bold lexically significant Greek-linked words in the diagram output",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Skip the diagram cache and always call the LLM",
     )
     args = parser.parse_args()
     args.reference = args.reference or args.reference_arg
@@ -1516,7 +1594,13 @@ def main() -> int:
         print(prompt)
         return 0
 
-    body, usage = generate_validated_diagram(prompt, args.model)
+    cached = None if args.no_cache else load_cached_diagram(reference, args.model)
+    if cached is not None:
+        body, usage = cached
+        print("Using cached diagram", file=sys.stderr)
+    else:
+        body, usage = generate_validated_diagram(prompt, args.model)
+        save_cached_diagram(reference, args.model, body, usage)
     if bdag_index:
         body = apply_bold_words(body, identify_bold_words(verse_words, bdag_index))
     # Obsidian Live Preview does not consistently render HTML entities like `&nbsp;`.
