@@ -36,6 +36,14 @@ python3 index_bdag.py \
   --index-path data/bdag_index.json
 ```
 
+5. Move/replace the Obsidian note with the generated `output/` file:
+
+```bash
+mv -f "output/John 13.1-30.md" "$OBSIDIAN_VAULT_PATH/Bible Study/John 13.1-30.md"
+```
+
+`$OBSIDIAN_VAULT_PATH` is set in `~/.zshrc`. Use `cp -f` instead of `mv -f` if you want to keep a copy in `output/`.
+
 If you are working on a different passage, change the reference in commands 1-3 and point `--input` at the matching file under `output/`.
 
 ## Files
