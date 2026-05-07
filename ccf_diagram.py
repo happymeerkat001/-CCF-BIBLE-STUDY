@@ -2236,6 +2236,7 @@ def main() -> int:
                     f"Warning: could not publish {output_path.name} to {publish_dir} ({exc}).",
                     file=sys.stderr,
                 )
+        print("Done.", file=sys.stderr)
         return 0
 
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -2310,6 +2311,7 @@ def main() -> int:
                 f"Warning: could not publish {output_path.name} to {publish_dir} ({exc}).",
                 file=sys.stderr,
             )
+    print("Done.", file=sys.stderr)
     return 0
 
 
