@@ -9,6 +9,27 @@ from pathlib import Path
 
 
 VERSE_RE = re.compile(r"(?<!\d)(\d+):(\d+)(?:-(\d+))?")
+# Chinese number words → digits for chapter detection in CCF headers
+_CN_DIGITS = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15,
+    "十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20,
+    "二十一": 21, "二十二": 22, "二十三": 23, "二十四": 24, "二十五": 25,
+    "二十六": 26, "二十七": 27, "二十八": 28,
+}
+# Known Chinese book name prefixes used in cross-references (not John itself)
+_CROSS_REF_BOOK_PREFIXES = (
+    "路", "太", "可", "腓", "弗", "西", "帖", "提", "多", "門",
+    "來", "雅", "彼", "約壹", "約貳", "約叁", "猶", "啟",
+    "創", "出", "利", "民", "申", "書", "士", "得", "撒",
+    "王", "代", "拉", "尼", "斯", "伯", "詩", "箴", "傳",
+    "歌", "賽", "耶", "哀", "結", "但", "何", "珥", "摩",
+    "俄", "拿", "彌", "鴻", "哈", "番", "該", "亞", "瑪",
+    "徒", "羅", "林", "加",
+    "路加福音", "馬太福音", "馬可福音", "使徒行傳",
+    "腓立比書", "以弗所書", "歌羅西書", "彼得前書", "彼得後書",
+)
 BOOK_ORDER = [
     "matthew",
     "mark",
@@ -141,6 +162,184 @@ def _find_book_start_page(pages: list[str], heading: str) -> int | None:
     return None
 
 
+def ocr_pdf_text(pdf_path: Path) -> str:
+    """Extract text from a PDF via OCR (for PDFs with broken font encodings)."""
+    import fitz  # type: ignore
+
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "OCR requires pytesseract and Pillow. "
+            "Install: pip install pytesseract Pillow; brew install tesseract tesseract-lang"
+        ) from exc
+
+    import io
+
+    doc = fitz.open(pdf_path)
+    pages: list[str] = []
+    for page in doc:
+        # 3x zoom for better CJK OCR accuracy
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        text = pytesseract.image_to_string(
+            img, lang="chi_tra+eng",
+            config="--psm 6",
+        )
+        pages.append(text)
+    return "\n".join(pages)
+
+
+def _text_looks_garbled(text: str) -> bool:
+    """Heuristic: if CJK text has very few real CJK chars, extraction is garbled."""
+    cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff" or "\u3400" <= ch <= "\u4dbf")
+    total = len(text.strip())
+    if total < 50:
+        return True
+    return cjk_count / total < 0.05
+
+
+def _detect_chapter_from_header(text: str) -> int | None:
+    """Detect chapter number from CCF header like '第十三章'."""
+    match = re.search(r"第([一二三四五六七八九十]+)章", text)
+    if not match:
+        return None
+    cn = match.group(1)
+    return _CN_DIGITS.get(cn)
+
+
+def _is_cross_reference(text_before_ref: str) -> bool:
+    """Check if a verse reference is preceded by a cross-ref book name."""
+    stripped = text_before_ref.rstrip()
+    for prefix in _CROSS_REF_BOOK_PREFIXES:
+        if stripped.endswith(prefix):
+            return True
+    return False
+
+
+def _extract_local_verses(line: str, chapter: int) -> list[int] | None:
+    """Extract all verse numbers for *this* chapter from a line.
+
+    Handles patterns like (13:1), (13:4-5), (13:18,21), (13:10 下-11,26-27).
+    Returns a sorted list of individual verse numbers, or None if no match.
+    """
+    verses: set[int] = set()
+    # Match chapter:verse patterns, possibly followed by comma-separated extras
+    pattern = re.compile(
+        rf"(?<!\d){chapter}\s*:\s*(\d+)"
+        r"(?:\s*[下上])?"
+        r"(?:\s*[-–]\s*(\d+))?"
+        r"((?:\s*[,，]\s*\d+(?:\s*[-–]\s*\d+)?)*)"
+    )
+    for m in pattern.finditer(line):
+        prefix = line[:m.start()]
+        if _is_cross_reference(prefix):
+            continue
+        start_v = int(m.group(1))
+        end_v = int(m.group(2)) if m.group(2) else start_v
+        for v in range(start_v, end_v + 1):
+            verses.add(v)
+        # Parse comma-separated trailing verse numbers
+        if m.group(3):
+            for extra in re.finditer(r"(\d+)(?:\s*[-–]\s*(\d+))?", m.group(3)):
+                ev_start = int(extra.group(1))
+                ev_end = int(extra.group(2)) if extra.group(2) else ev_start
+                for v in range(ev_start, ev_end + 1):
+                    verses.add(v)
+    return sorted(verses) if verses else None
+
+
+def build_ccf_index(text: str) -> dict[str, list[str]]:
+    """Parse CCF Q&A answer sheets into a verse-keyed index.
+
+    Understands numbered questions (3., 4.), sub-questions ((1), (2)),
+    and correctly inherits verse references for sub-questions that don't
+    specify their own verse.
+    """
+    normalized = normalize_text(text)
+    chapter = _detect_chapter_from_header(normalized)
+    if chapter is None:
+        ch_counts: dict[int, int] = {}
+        for m in VERSE_RE.finditer(normalized):
+            ch = int(m.group(1))
+            ch_counts[ch] = ch_counts.get(ch, 0) + 1
+        if ch_counts:
+            chapter = max(ch_counts, key=ch_counts.get)  # type: ignore[arg-type]
+        else:
+            return {}
+
+    lines = normalized.splitlines()
+    main_q_re = re.compile(r"^\s*(\d{1,2})\s*[.．、]\s*")
+    sub_q_re = re.compile(r"^\s*[（(]\s*(\d)\s*[）)]\s*")
+    day_re = re.compile(r"^\s*第[一二三四五六七八九十]+天\s*[:：]")
+    skip_re = re.compile(
+        r"^(背誦金句|本查經|此問題特為|CCF International|請勿複印|P\d+$)"
+    )
+
+    index: dict[str, list[str]] = {}
+    current_verses: list[int] = []
+    main_q_verses: list[int] = []  # verse(s) from the main question (for sub-q inheritance)
+    current_block: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal current_block
+        if not current_block or not current_verses:
+            current_block = []
+            return
+        note = " ".join(current_block).strip()
+        note = re.sub(r"\s+", " ", note)
+        if not note:
+            current_block = []
+            return
+        for v in current_verses:
+            index.setdefault(f"{chapter}:{v}", []).append(note)
+        current_block = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if day_re.match(stripped):
+            flush_block()
+            continue
+        if skip_re.match(stripped):
+            flush_block()
+            continue
+
+        main_match = main_q_re.match(stripped)
+        sub_match = sub_q_re.match(stripped) if not main_match else None
+
+        is_question_start = bool(main_match or sub_match)
+
+        # Even on non-question lines, check for a verse ref — this handles
+        # garbled OCR where the question number is lost but the ref survives.
+        line_verses = _extract_local_verses(stripped, chapter)
+
+        if is_question_start:
+            flush_block()
+            if line_verses:
+                current_verses = line_verses
+                if main_match:
+                    main_q_verses = line_verses
+            elif main_match:
+                # Main question with no verse ref — reset inheritance
+                current_verses = main_q_verses  # keep previous main
+            # else: sub-question inherits current_verses
+            current_block = [stripped]
+        elif line_verses and not current_block:
+            # Orphan line with a verse ref (garbled question start)
+            flush_block()
+            current_verses = line_verses
+            main_q_verses = line_verses
+            current_block = [stripped]
+        else:
+            current_block.append(stripped)
+
+    flush_block()
+    return dict(sorted(index.items(), key=_sort_key))
+
+
 def normalize_text(text: str) -> str:
     text = text.replace("\r", "\n")
     text = text.replace("\u00AD", "")
@@ -200,8 +399,15 @@ def main() -> int:
         raise SystemExit(f"PDF not found: {pdf_path}")
 
     output_path = Path(args.output or f"data/{key}_{book}.json")
-    text = extract_pdf_text_for_book(pdf_path, book)
-    index = build_commentary_index(text)
+    if key == "ccf":
+        text = extract_pdf_text_for_book(pdf_path, book)
+        if _text_looks_garbled(text):
+            print("Text extraction garbled, falling back to OCR...", file=sys.stderr)
+            text = ocr_pdf_text(pdf_path)
+        index = build_ccf_index(text)
+    else:
+        text = extract_pdf_text_for_book(pdf_path, book)
+        index = build_commentary_index(text)
     if not index:
         raise SystemExit("No chapter:verse note anchors were parsed from the PDF.")
 
