@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import html
+import http.client
 import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1664,14 +1666,30 @@ def call_openrouter_messages(messages: list[dict[str, str]], model: str) -> tupl
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise DiagramError(f"OpenRouter request failed: HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise DiagramError(f"OpenRouter network error: {exc}") from exc
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            break
+        except http.client.IncompleteRead as exc:
+            if attempt < max_retries - 1:
+                wait = 2 ** attempt
+                print(f"Connection dropped, retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+                request = urllib.request.Request(
+                    request.full_url,
+                    data=request.data,
+                    headers=dict(request.headers),
+                    method=request.method,
+                )
+                continue
+            raise DiagramError(f"OpenRouter connection dropped after {max_retries} attempts: {exc}") from exc
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise DiagramError(f"OpenRouter request failed: HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise DiagramError(f"OpenRouter network error: {exc}") from exc
 
     choices = raw.get("choices") or []
     if not choices:
@@ -1918,7 +1936,7 @@ def generate_diagram_for_reference(
         return chunk, body, usage
 
     chunk_results: dict[tuple[int, int], tuple[str, dict[str, Any]]] = {}
-    with ThreadPoolExecutor(max_workers=min(len(chunks), 4)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 2)) as pool:
         futures = {
             pool.submit(_generate_chunk, chunk): chunk
             for chunk in chunks
