@@ -2,10 +2,47 @@
 
 This folder contains scripts for CCF Bible study preparation.
 
+## Quick workflow
+
+Run these three commands for the standard study-prep flow:
+
+1. Get the message to send out:
+
+```bash
+python3 ccf_preview_message.py --reference "John 13:1-30" --previous-lesson L15
+```
+
+2. Generate the diagram with built-in commentary sources:
+
+```bash
+python3 ccf_diagram.py "John 13:1-30" \
+  --footnotes \
+  --commentary-sources fbc,net \
+  --bold-words
+```
+
+3. After downloading and manually extracting the CCF Q&A into `data/ccf_qa_john.json`, append the CCF foldable commentary blocks:
+
+```bash
+python3 ccf_append_qa.py --input 'output/John 13.1-30.md' --qa data/ccf_qa_john.json
+```
+
+4. Build/update the BDAG lexicon index from the local PDF source:
+
+```bash
+python3 index_bdag.py \
+  --url "file:///Users/leon/Documents/Code/CCF%20Bible%20Study/Sources/BDAG-A-Greek-English-Lexicon-of-the-New-Testament-and-Other-Early-Christian-Literature-Walter-Bauer-Frederick-William-Danker-etc.-z-lib.org_.pdf" \
+  --pdf-path "Sources/BDAG-A-Greek-English-Lexicon-of-the-New-Testament-and-Other-Early-Christian-Literature-Walter-Bauer-Frederick-William-Danker-etc.-z-lib.org_.pdf" \
+  --index-path data/bdag_index.json
+```
+
+If you are working on a different passage, change the reference in commands 1-3 and point `--input` at the matching file under `output/`.
+
 ## Files
 
 - `ccf_preview_message.py`
 - `ccf_diagram.py`
+- `ccf_append_qa.py`
 - `index_bdag.py`
 - `index_commentary_pdf.py`
 
@@ -118,6 +155,7 @@ If you want the full output for a passage, including:
 - the sentence diagram
 - foldable commentary blocks
 - bolded Greek-linked word-study terms
+- then a separate post-processing step for CCF Q&A
 
 run:
 
@@ -147,6 +185,21 @@ python3 ccf_diagram.py "John 6:1-5" \
 ```
 
 `--footnotes` is the master switch for commentary output. `--bold-words` is independent and requires a local BDAG index.
+
+### CCF Q&A post-processing
+
+`ccf_diagram.py` does not currently inject CCF Questions/Answers directly. After the diagram is generated, run a separate post-processing step:
+
+```bash
+python3 ccf_append_qa.py --input 'output/John 13.1-30.md' --qa data/ccf_qa_john.json
+```
+
+Notes:
+
+- `--input` should point to the generated markdown file in `output/`.
+- `--qa` should point to a verse-keyed JSON file such as `data/ccf_qa_john.json`.
+- The script injects a nested `✏️  CCF 問題與解答` block inside each verse commentary section.
+- The script is idempotent, so rerunning it replaces existing CCF blocks instead of duplicating them.
 
 ### One-time indexing commands
 
