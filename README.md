@@ -21,6 +21,20 @@ python3 ccf_diagram.py "John 13:1-30" \
   --commentary-sources all
 ```
 
+Chinese reference input is supported too (same output format):
+
+```bash
+python3 ccf_diagram.py "约13:1-30" \
+  --footnotes \
+  --commentary-sources all
+```
+
+Current Chinese-output status:
+
+- `ccf_diagram.py` now fetches CUS (`和合本简体`) Chinese verses by default and inserts them under each `<strong>N</strong>` verse marker before the English diagram lines.
+- Chinese references such as `约13:1-30` and English references such as `John 13:1-30` both work with the same bilingual output.
+- Use `--no-chinese` if you want to skip Chinese verse injection for one run.
+
 3. If you already have a diagram and only want to append or refresh commentary without another LLM run, use `--commentary-only`:
 
 ```bash
@@ -130,6 +144,11 @@ python3 ccf_preview_message.py \
 - API.Bible verse text
 - OpenRouter for English clause mapping and HTML formatting
 
+Chinese note:
+
+- Input references can be English or Chinese book names/abbreviations.
+- Chinese CUS verse text is fetched separately and inserted under each verse number by default.
+
 ### Environment
 
 Store secrets in `.env`:
@@ -149,6 +168,7 @@ OBSIDIAN_BIBLE_STUDY_DIR="~/Library/Mobile Documents/iCloud~md~obsidian/Document
 ```bash
 python3 ccf_diagram.py "John 6"
 python3 ccf_diagram.py "John 6:1-21"
+python3 ccf_diagram.py "约13:1-30" --footnotes --commentary-sources all
 python3 ccf_diagram.py "John 6" --model "deepseek/deepseek-chat-v3-0324"
 python3 ccf_diagram.py "John 6:1-14" --dump-prompt
 python3 ccf_diagram.py "John 6:1-14" --english-source macula-gloss
@@ -158,6 +178,7 @@ python3 ccf_diagram.py "John 12:20-50" --commentary-only --footnotes --commentar
 python3 ccf_diagram.py "John 6:1-14" --publish-dir "/tmp/Bible Study"
 python3 ccf_diagram.py "John 6:1-14" --publish-mode move
 python3 ccf_diagram.py "John 6:1-14" --no-publish
+python3 ccf_diagram.py "John 6:1-14" --no-chinese
 ```
 
 Outputs are always written to `output/` first, then published to the Obsidian vault copy by default at `/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/Neural-orchestrator/Bible Study`.
@@ -279,6 +300,8 @@ Use a real PDF path. `path/to/...` in examples is a placeholder, so the command 
 - `--footnotes-style collapse` is the default and renders nested `<details>` blocks: one outer block per verse, then one inner block per commentary source.
 - `--footnotes` with no `--commentary-sources` uses `fbc` by default for backward compatibility.
 - `--commentary-only` skips diagram generation, reads the existing output file, strips old commentary blocks, preserves existing sources already present in the file, and merges in the newly requested sources.
+- Chinese verse injection is enabled by default and is idempotent, so rerunning the command or `--commentary-only` replaces existing injected Chinese lines instead of duplicating them.
+- `--no-chinese` disables the CUS fetch/injection path for one run.
 - `--bold-words` bolds lexically significant Greek-linked English terms inside the generated diagram and requires `data/bdag_index.json`.
 - `--commentary-sources all` expands to `fbc`, `net`, `keener`, and `ccf`, and auto-enables `--bold-words`.
 - The `net` source currently depends on what `labs.bible.org` exposes for the requested passage; if only note markers are available, the output may fall back to marker-context snippets instead of full note bodies.

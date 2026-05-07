@@ -30,6 +30,7 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_FALLBACK_MODEL = "deepseek/deepseek-chat-v3-0324"
 DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
 DEFAULT_NET_BIBLE_NOTES_URL = "https://labs.bible.org/api/"
+DEFAULT_CHINESE_BIBLE_ENDPOINT = "https://api.getbible.net/v2/cus"
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
     "/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
     "Neural-orchestrator/Bible Study"
@@ -172,6 +173,9 @@ BOOK_CODE_TO_SLUG = {
 }
 
 SLUG_TO_CODE = {value: key for key, value in BOOK_CODE_TO_SLUG.items()}
+SLUG_TO_BOOK_NUM = {
+    slug: 40 + index for index, slug in enumerate(BOOK_CODE_TO_SLUG.values())
+}
 BOOK_FILENAME_ORDER = [
     "matthew",
     "mark",
@@ -1380,6 +1384,45 @@ def fetch_bible_text(reference: Reference) -> dict[int, str]:
     return verses
 
 
+def fetch_chinese_bible_text(reference: Reference) -> dict[int, str]:
+    book_num = SLUG_TO_BOOK_NUM.get(reference.book_slug)
+    if book_num is None:
+        print(
+            f"Warning: Chinese verse mapping is not available for {reference.book_slug}.",
+            file=sys.stderr,
+        )
+        return {}
+
+    endpoint = os.getenv("CHINESE_BIBLE_ENDPOINT", DEFAULT_CHINESE_BIBLE_ENDPOINT).rstrip("/")
+    url = f"{endpoint}/{book_num}/{reference.chapter}.json"
+    try:
+        payload = http_get_json(
+            url,
+            headers={
+                "accept": "application/json",
+                "User-Agent": "CCF Bible Study Diagram Generator/1.0",
+            },
+        )
+    except DiagramError as exc:
+        print(f"Warning: Chinese Bible fetch failed ({exc}), skipping.", file=sys.stderr)
+        return {}
+
+    requested_start = reference.start_verse or 1
+    requested_end = reference.end_verse or 10**9
+    verses: dict[int, str] = {}
+    for entry in payload.get("verses", []):
+        try:
+            verse_num = int(entry.get("verse"))
+        except (TypeError, ValueError):
+            continue
+        if verse_num < requested_start or verse_num > requested_end:
+            continue
+        text = re.sub(r"\s+", " ", str(entry.get("text", ""))).strip()
+        if text:
+            verses[verse_num] = text
+    return verses
+
+
 def build_gloss_fallback(verse_words: dict[int, list[WordEntry]]) -> dict[int, str]:
     verses: dict[int, str] = {}
     for verse_num, words in verse_words.items():
@@ -1428,6 +1471,34 @@ def sanitize_english_text(verses: dict[int, str]) -> dict[int, str]:
         normalized = re.sub(r"\s+", " ", normalized).strip()
         cleaned[verse_num] = normalized
     return cleaned
+
+
+def inject_chinese_text(body: str, chinese_text: dict[int, str]) -> str:
+    if not chinese_text:
+        return body
+
+    # Remove previously injected Chinese blocks so reruns stay idempotent.
+    body = re.sub(
+        r'(<strong>\d+</strong>\s*)<p lang="zh-Hans" style="color: #888;">.*?</p>\s*',
+        r"\1",
+        body,
+        flags=re.DOTALL,
+    )
+
+    verse_pattern = re.compile(r"(<strong>(\d+)</strong>)")
+
+    def _replace(match: re.Match[str]) -> str:
+        verse_num = int(match.group(2))
+        chinese = chinese_text.get(verse_num)
+        if not chinese:
+            return match.group(1)
+        chinese_line = (
+            f'{match.group(1)}\n'
+            f'<p lang="zh-Hans" style="color: #888;">{html.escape(chinese)}</p>'
+        )
+        return chinese_line
+
+    return verse_pattern.sub(_replace, body)
 
 
 def simplify_macula(reference: Reference, verse_words: dict[int, list[WordEntry]]) -> list[dict[str, Any]]:
@@ -1839,6 +1910,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the diagram cache and always call the LLM",
     )
+    parser.add_argument(
+        "--no-chinese",
+        action="store_true",
+        help="Skip fetching and injecting Chinese verse text under each verse number",
+    )
     args = parser.parse_args()
     args.reference = args.reference or args.reference_arg
     if not args.reference:
@@ -1859,6 +1935,7 @@ def main() -> int:
     bdag_index: dict[str, str] = {}
     commentary_sources: list[CommentarySource] = []
     english_text: dict[int, str] = {}
+    chinese_text: dict[int, str] = {}
 
     requested_sources: list[str] = []
     if args.footnotes:
@@ -1898,9 +1975,14 @@ def main() -> int:
         with ThreadPoolExecutor(max_workers=6) as pool:
             commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
             bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
+            chinese_future = (
+                pool.submit(fetch_chinese_bible_text, reference) if not args.no_chinese else None
+            )
 
             if bdag_future is not None:
                 bdag_index = bdag_future.result()
+            if chinese_future is not None:
+                chinese_text = chinese_future.result()
             for key in requested_sources:
                 try:
                     fetched = commentary_futures[key].result()
@@ -1918,6 +2000,8 @@ def main() -> int:
         if bold_words:
             body = apply_bold_words(body, bold_words)
         body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
+        if chinese_text:
+            body = inject_chinese_text(body, chinese_text)
         if commentary_sources:
             body = add_commentary_footnotes(
                 body,
@@ -1944,10 +2028,13 @@ def main() -> int:
         english_future = pool.submit(_fetch_english)
         commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
         bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
+        chinese_future = pool.submit(fetch_chinese_bible_text, reference) if not args.no_chinese else None
 
         english_text = sanitize_english_text(english_future.result())
         if bdag_future is not None:
             bdag_index = bdag_future.result()
+        if chinese_future is not None:
+            chinese_text = chinese_future.result()
         for key in requested_sources:
             try:
                 commentary_sources.append(commentary_futures[key].result())
@@ -1972,6 +2059,8 @@ def main() -> int:
     # Obsidian Live Preview does not consistently render HTML entities like `&nbsp;`.
     # Convert them to real NBSP characters so indentation displays correctly while editing.
     body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
+    if chinese_text:
+        body = inject_chinese_text(body, chinese_text)
     if commentary_sources:
         body = add_commentary_footnotes(
             body,
