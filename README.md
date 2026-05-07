@@ -40,6 +40,15 @@ python3 index_bdag.py \
 
 ```bash
 mv -f "output/John 13.1-30.md" "$OBSIDIAN_VAULT_PATH/Bible Study/John 13.1-30.md"
+
+6. add Keener and Lexicon:
+
+  python3 ccf_diagram.py "John 13:1-5" \
+    --footnotes \
+    --commentary-sources keener \
+    --bold-words \
+    --no-publish
+
 ```
 
 `$OBSIDIAN_VAULT_PATH` is set in `~/.zshrc`. Use `cp -f` instead of `mv -f` if you want to keep a copy in `output/`.
@@ -181,6 +190,16 @@ python3 ccf_diagram.py "John 6:1-5" \
   --footnotes \
   --commentary-sources fbc,net \
   --bold-words
+```
+
+If you want to verify the nested `📘 Lexicon — BDAG` block inside each verse's commentary using the local Keener index:
+
+```bash
+python3 ccf_diagram.py "John 13:1-5" \
+  --footnotes \
+  --commentary-sources keener \
+  --bold-words \
+  --no-publish
 ```
 
 If you want every configured source:

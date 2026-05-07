@@ -878,9 +878,12 @@ def add_commentary_footnotes(
     reference: Reference,
     sources: list[CommentarySource],
     style: str,
+    bold_words: dict[int, list[BoldWord]] | None = None,
 ) -> str:
-    if not sources:
+    if not sources and not bold_words:
         return body
+
+    bold_words = bold_words or {}
 
     lines = body.splitlines()
     output: list[str] = []
@@ -903,7 +906,19 @@ def add_commentary_footnotes(
                 if source.notes.get(current_verse)
             ]
             if verse_notes:
-                output.extend(["", format_verse_commentary(reference, current_verse, verse_notes, style), ""])
+                output.extend(
+                    [
+                        "",
+                        format_verse_commentary(
+                            reference,
+                            current_verse,
+                            verse_notes,
+                            style,
+                            bold_words.get(current_verse, []),
+                        ),
+                        "",
+                    ]
+                )
         verse_buffer.clear()
 
     for line in lines:
@@ -931,23 +946,44 @@ def format_commentary_notes(
     return "\n".join(["<details>", f"<summary>{summary}</summary>", "", *bullet_lines, "</details>"])
 
 
+def format_lexicon_block(bold_words: list[BoldWord], style: str) -> str:
+    if not bold_words:
+        return ""
+
+    count = len(bold_words)
+    summary = f"📘 Lexicon — BDAG ({count} entr{'y' if count == 1 else 'ies'})"
+    bullet_lines = [
+        f"- **{word.surface}** ({word.lemma}) — {word.gloss}"
+        for word in bold_words
+    ]
+    if style == "inline":
+        return "\n".join([f"**{summary}**", *bullet_lines])
+    return "\n".join(["<details>", f"<summary>{summary}</summary>", "", *bullet_lines, "</details>"])
+
+
 def format_verse_commentary(
     reference: Reference,
     verse_num: int,
     sources: list[CommentarySource],
     style: str,
+    bold_words: list[BoldWord] | None = None,
 ) -> str:
     header = f"Commentary — {reference.book_label} {reference.chapter}:{verse_num}"
+    lexicon_block = format_lexicon_block(bold_words or [], style)
     if style == "inline":
         parts = [f"**{header}**"]
         for source in sources:
             rendered = format_commentary_notes(source, verse_num, style)
             if rendered:
                 parts.extend(["", rendered])
+        if lexicon_block:
+            parts.extend(["", lexicon_block])
         return "\n".join(parts)
 
     inner_blocks = [format_commentary_notes(source, verse_num, style) for source in sources]
     inner_blocks = [block for block in inner_blocks if block]
+    if lexicon_block:
+        inner_blocks.append(lexicon_block)
     return "\n".join(
         [
             "<details>",
@@ -1601,13 +1637,20 @@ def main() -> int:
     else:
         body, usage = generate_validated_diagram(prompt, args.model)
         save_cached_diagram(reference, args.model, body, usage)
-    if bdag_index:
-        body = apply_bold_words(body, identify_bold_words(verse_words, bdag_index))
+    bold_words = identify_bold_words(verse_words, bdag_index) if bdag_index else {}
+    if bold_words:
+        body = apply_bold_words(body, bold_words)
     # Obsidian Live Preview does not consistently render HTML entities like `&nbsp;`.
     # Convert them to real NBSP characters so indentation displays correctly while editing.
     body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
     if commentary_sources:
-        body = add_commentary_footnotes(body, reference, commentary_sources, args.footnotes_style)
+        body = add_commentary_footnotes(
+            body,
+            reference,
+            commentary_sources,
+            args.footnotes_style,
+            bold_words,
+        )
     output_path = write_output(reference, body, usage, Path(args.output_dir))
     publish_dir = resolve_publish_dir(args)
     print(output_path)
