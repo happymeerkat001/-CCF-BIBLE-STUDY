@@ -312,6 +312,56 @@ CHINESE_BOOK_ALIASES = {
     "启示录": "启示录",
 }
 
+TRAD_TO_SIMP_BOOK = {
+    "創世記": "创世记",
+    "出埃及記": "出埃及记",
+    "利未記": "利未记",
+    "民數記": "民数记",
+    "申命記": "申命记",
+    "約書亞記": "约书亚记",
+    "士師記": "士师记",
+    "撒母耳記上": "撒母耳记上",
+    "撒母耳記下": "撒母耳记下",
+    "列王紀上": "列王纪上",
+    "列王紀下": "列王纪下",
+    "歷代志上": "历代志上",
+    "歷代志下": "历代志下",
+    "約伯記": "约伯记",
+    "詩篇": "诗篇",
+    "箴言": "箴言",
+    "傳道書": "传道书",
+    "耶利米哀歌": "耶利米哀歌",
+    "以西結書": "以西结书",
+    "約珥書": "约珥书",
+    "哈巴谷書": "哈巴谷书",
+    "瑪拉基書": "玛拉基书",
+    "馬太福音": "马太福音",
+    "馬可福音": "马可福音",
+    "路加福音": "路加福音",
+    "約翰福音": "约翰福音",
+    "羅馬書": "罗马书",
+    "哥林多前書": "哥林多前书",
+    "哥林多後書": "哥林多后书",
+    "加拉太書": "加拉太书",
+    "以弗所書": "以弗所书",
+    "腓立比書": "腓立比书",
+    "歌羅西書": "歌罗西书",
+    "帖撒羅尼迦前書": "帖撒罗尼迦前书",
+    "帖撒羅尼迦後書": "帖撒罗尼迦后书",
+    "提摩太前書": "提摩太前书",
+    "提摩太後書": "提摩太后书",
+    "腓利門書": "腓利门书",
+    "希伯來書": "希伯来书",
+    "雅各書": "雅各书",
+    "彼得前書": "彼得前书",
+    "彼得後書": "彼得后书",
+    "約翰一書": "约翰一书",
+    "約翰二書": "约翰二书",
+    "約翰三書": "约翰三书",
+    "猶大書": "犹大书",
+    "啟示錄": "启示录",
+}
+
 FILE_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]+)|[?&]id=([A-Za-z0-9_-]+)")
 LESSON_RE = re.compile(r"L(\d{2})", re.IGNORECASE)
 FOLDER_ENTRY_RE = re.compile(
@@ -322,6 +372,14 @@ FOLDER_ENTRY_RE = re.compile(
 REFERENCE_RE = re.compile(
     r"^\s*(?P<book>.+?)\s*(?P<chapter>\d+)\s*:\s*"
     r"(?P<start>\d+)(?:\s*-\s*(?P<end>\d+))?\s*$"
+)
+TITLE_REF_RE = re.compile(
+    r"(?P<book>\S+)\s+"
+    r"第(?P<ch1>[一二三四五六七八九十百零〇兩两]+)章"
+    r"(?:第)?(?P<v1>[一二三四五六七八九十百零〇兩两]+)節"
+    r"至"
+    r"(?:第(?P<ch2>[一二三四五六七八九十百零〇兩两]+)章)?"
+    r"(?:第)?(?P<v2>[一二三四五六七八九十百零〇兩两]+)節"
 )
 
 
@@ -405,6 +463,48 @@ def _validate_previous_lesson_code(previous_lesson: str) -> str:
     return lesson_code
 
 
+def _chinese_number_to_int(text: str) -> int:
+    numerals = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "兩": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    compact = text.strip()
+    if not compact:
+        raise ValueError("Chinese numeral cannot be empty.")
+    if compact == "十":
+        return 10
+
+    total = 0
+    if "百" in compact:
+        hundreds_text, compact = compact.split("百", 1)
+        total += (numerals.get(hundreds_text, 1) if hundreds_text else 1) * 100
+        compact = compact.lstrip("零〇")
+
+    if "十" in compact:
+        tens_text, ones_text = compact.split("十", 1)
+        total += (numerals.get(tens_text, 1) if tens_text else 1) * 10
+        if ones_text:
+            if ones_text not in numerals:
+                raise ValueError(f"Unsupported Chinese numeral: {text}")
+            total += numerals[ones_text]
+        return total
+
+    if compact not in numerals:
+        raise ValueError(f"Unsupported Chinese numeral: {text}")
+    return total + numerals[compact]
+
+
 def _normalize_reference(reference: str) -> str:
     compact = reference.strip()
     match = REFERENCE_RE.match(compact)
@@ -432,6 +532,27 @@ def _normalize_reference(reference: str) -> str:
     if end:
         verse_part += f"-{end}"
     return f"{normalized_book}{verse_part}"
+
+
+def _extract_reference_from_title(title: str) -> str:
+    match = TITLE_REF_RE.search(title)
+    if not match:
+        raise ValueError(
+            f"Could not extract Bible reference from title: {title}"
+        )
+
+    book = match.group("book").strip()
+    normalized_book = TRAD_TO_SIMP_BOOK.get(book, book)
+    ch1 = _chinese_number_to_int(match.group("ch1"))
+    v1 = _chinese_number_to_int(match.group("v1"))
+    ch2_text = match.group("ch2")
+    v2 = _chinese_number_to_int(match.group("v2"))
+
+    if ch2_text is None:
+        return f"{normalized_book}{ch1}:{v1}-{v2}"
+
+    ch2 = _chinese_number_to_int(ch2_text)
+    return f"{normalized_book}{ch1}:{v1}-{ch2}:{v2}"
 
 
 def build_message(
@@ -500,13 +621,16 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        normalized_reference = _normalize_reference(args.reference)
         previous_lesson_code = _validate_previous_lesson_code(args.previous_lesson)
         current_lesson_code = _next_lesson_code(previous_lesson_code)
         resource_links = [
             _find_resource_link(label, current_lesson_code)
             for label in ("Note", "Lecture", "Questions", "Answers")
         ]
+        if args.reference:
+            normalized_reference = _normalize_reference(args.reference)
+        else:
+            normalized_reference = _extract_reference_from_title(resource_links[0].title)
     except (OSError, urllib.error.URLError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
