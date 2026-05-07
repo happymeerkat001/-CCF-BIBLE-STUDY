@@ -4,30 +4,34 @@ This folder contains scripts for CCF Bible study preparation.
 
 ## Quick workflow
 
-Run these three commands for the standard study-prep flow:
+Use this flow for the normal study-prep path.
 
-1. Get the message to send out:
+1. Get the reminder message:
 
 ```bash
 python3 ccf_preview_message.py --reference "John 13:1-30" --previous-lesson L15
 ```
 
-2. Generate the diagram with built-in commentary sources:
+2. Generate the full diagram with all commentary sources.
+`all` means `fbc`, `net`, `keener`, and `ccf`, and it auto-enables BDAG bold-word lookup:
 
 ```bash
 python3 ccf_diagram.py "John 13:1-30" \
   --footnotes \
-  --commentary-sources fbc,net \
-  --bold-words
+  --commentary-sources all
 ```
 
-3. After downloading and manually extracting the CCF Q&A into `data/ccf_qa_john.json`, append the CCF foldable commentary blocks:
+3. If you already have a diagram and only want to append or refresh commentary without another LLM run, use `--commentary-only`:
 
 ```bash
-python3 ccf_append_qa.py --input 'output/John 13.1-30.md' --qa data/ccf_qa_john.json
+python3 ccf_diagram.py "John 13:1-30" \
+  --commentary-only \
+  --footnotes \
+  --commentary-sources fbc,keener,ccf \
+  --no-publish
 ```
 
-4. Build/update the BDAG lexicon index from the local PDF source:
+4. Build/update the BDAG lexicon index from the local PDF source when needed:
 
 ```bash
 python3 index_bdag.py \
@@ -36,24 +40,16 @@ python3 index_bdag.py \
   --index-path data/bdag_index.json
 ```
 
-5. Move/replace the Obsidian note with the generated `output/` file:
+5. Build/update local PDF commentary indexes when needed:
 
 ```bash
-mv -f "output/John 13.1-30.md" "$OBSIDIAN_VAULT_PATH/Bible Study/John 13.1-30.md"
-
-6. add Keener and Lexicon:
-
-  python3 ccf_diagram.py "John 13:1-5" \
-    --footnotes \
-    --commentary-sources keener \
-    --bold-words \
-    --no-publish
-
+python3 index_commentary_pdf.py --pdf "/real/path/to/keener.pdf" --book john --key keener
+python3 index_commentary_pdf.py --pdf "~/Downloads/ccf.pdf" --book john --key ccf
 ```
 
-`$OBSIDIAN_VAULT_PATH` is set in `~/.zshrc`. Use `cp -f` instead of `mv -f` if you want to keep a copy in `output/`.
+`ccf_diagram.py` writes to `output/` first and publishes to the Obsidian Bible Study folder by default. Add `--no-publish` if you only want the local output copy.
 
-If you are working on a different passage, change the reference in commands 1-3 and point `--input` at the matching file under `output/`.
+If you are working on a different passage, change the reference in the commands above.
 
 ## Files
 
@@ -158,6 +154,7 @@ python3 ccf_diagram.py "John 6:1-14" --dump-prompt
 python3 ccf_diagram.py "John 6:1-14" --english-source macula-gloss
 python3 ccf_diagram.py "John 12:20-50" --footnotes
 python3 ccf_diagram.py "John 12:20-50" --footnotes --footnotes-style inline
+python3 ccf_diagram.py "John 12:20-50" --commentary-only --footnotes --commentary-sources fbc,ccf
 python3 ccf_diagram.py "John 6:1-14" --publish-dir "/tmp/Bible Study"
 python3 ccf_diagram.py "John 6:1-14" --publish-mode move
 python3 ccf_diagram.py "John 6:1-14" --no-publish
@@ -172,15 +169,14 @@ If you want the full output for a passage, including:
 - the sentence diagram
 - foldable commentary blocks
 - bolded Greek-linked word-study terms
-- then a separate post-processing step for CCF Q&A
+- built-in CCF commentary when indexed locally
 
 run:
 
 ```bash
-  python3 ccf_diagram.py "John 13:1-30" \
-    --footnotes \
-    --commentary-sources fbc,net \
-    --bold-words
+python3 ccf_diagram.py "John 13:1-30" \
+  --footnotes \
+  --commentary-sources all
 ```
 
 If you only want the built-in web sources for now:
@@ -189,10 +185,10 @@ If you only want the built-in web sources for now:
 python3 ccf_diagram.py "John 6:1-5" \
   --footnotes \
   --commentary-sources fbc,net \
-  --bold-words
+  --no-publish
 ```
 
-If you want to verify the nested `📘 Lexicon — BDAG` block inside each verse's commentary using the local Keener index:
+If you want Keener plus BDAG word study:
 
 ```bash
 python3 ccf_diagram.py "John 13:1-5" \
@@ -207,15 +203,26 @@ If you want every configured source:
 ```bash
 python3 ccf_diagram.py "John 6:1-5" \
   --footnotes \
-  --commentary-sources all \
-  --bold-words
+  --commentary-sources all
 ```
 
-`--footnotes` is the master switch for commentary output. `--bold-words` is independent and requires a local BDAG index.
+If you want to add or refresh commentary on an existing output file without regenerating the diagram:
+
+```bash
+python3 ccf_diagram.py "John 13:1-5" \
+  --commentary-only \
+  --footnotes \
+  --commentary-sources fbc \
+  --no-publish
+```
+
+`--footnotes` is the master switch for commentary output. `--bold-words` is still available independently and requires a local BDAG index. `--commentary-sources all` auto-enables `--bold-words`.
 
 ### CCF Q&A post-processing
 
-`ccf_diagram.py` does not currently inject CCF Questions/Answers directly. After the diagram is generated, run a separate post-processing step:
+`ccf_diagram.py` now supports `ccf` as a first-class commentary source when you have a matching `data/ccf_qa_{book}.json` index.
+
+`ccf_append_qa.py` is still useful as a standalone post-processor if you want to add or replace only the CCF Q&A block after the fact:
 
 ```bash
 python3 ccf_append_qa.py --input 'output/John 13.1-30.md' --qa data/ccf_qa_john.json
@@ -225,7 +232,7 @@ Notes:
 
 - `--input` should point to the generated markdown file in `output/`.
 - `--qa` should point to a verse-keyed JSON file such as `data/ccf_qa_john.json`.
-- The script injects a nested `✏️  CCF 問題與解答` block inside each verse commentary section.
+- The script injects a nested `✏️ CCF 問題與解答` block inside each verse commentary section.
 - The script is idempotent, so rerunning it replaces existing CCF blocks instead of duplicating them.
 
 ### One-time indexing commands
@@ -247,15 +254,17 @@ This writes:
 - `data/bdag.pdf`
 - `data/bdag_index.json`
 
-Before using local PDF commentary sources such as `keener`, build each book index once:
+Before using local PDF commentary sources such as `keener` or `ccf`, build each book index once:
 
 ```bash
 python3 index_commentary_pdf.py --pdf "/real/path/to/keener.pdf" --book john --key keener
+python3 index_commentary_pdf.py --pdf "~/Downloads/ccf.pdf" --book john --key ccf
 ```
 
 This writes files such as:
 
 - `data/keener_john.json`
+- `data/ccf_qa_john.json`
 
 Use a real PDF path. `path/to/...` in examples is a placeholder, so the command will fail until the PDF exists at that location. Run scripts with `python3 script_name.py` from this folder, or `./script_name.py` only after making the script executable and using the `./` prefix.
 
@@ -266,10 +275,12 @@ Use a real PDF path. `path/to/...` in examples is a placeholder, so the command 
 - If API.Bible is unavailable or your key is not authorized, `--english-source macula-gloss` uses MACULA glosses as the English source.
 - `--dump-prompt` is useful for prompt tuning before spending tokens.
 - `--footnotes` appends commentary after each verse block.
-- `--commentary-sources` accepts `fbc`, `net`, `keener`, or `all`.
+- `--commentary-sources` accepts `fbc`, `net`, `keener`, `ccf`, or `all`.
 - `--footnotes-style collapse` is the default and renders nested `<details>` blocks: one outer block per verse, then one inner block per commentary source.
 - `--footnotes` with no `--commentary-sources` uses `fbc` by default for backward compatibility.
+- `--commentary-only` skips diagram generation, reads the existing output file, strips old commentary blocks, preserves existing sources already present in the file, and merges in the newly requested sources.
 - `--bold-words` bolds lexically significant Greek-linked English terms inside the generated diagram and requires `data/bdag_index.json`.
+- `--commentary-sources all` expands to `fbc`, `net`, `keener`, and `ccf`, and auto-enables `--bold-words`.
 - The `net` source currently depends on what `labs.bible.org` exposes for the requested passage; if only note markers are available, the output may fall back to marker-context snippets instead of full note bodies.
 - `--publish-dir` overrides the vault destination for one run, `--publish-mode move` removes the local file after a successful publish, and `--no-publish` disables vault publishing entirely.
 - If the Obsidian/iCloud destination is unavailable, the script prints a warning to stderr and still keeps the local output as a successful run.
