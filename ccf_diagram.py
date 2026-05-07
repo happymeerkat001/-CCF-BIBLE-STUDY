@@ -26,8 +26,8 @@ DEFAULT_MACULA_BASE_URL = (
     "Nestle1904/lowfat"
 )
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324"
-DEFAULT_FALLBACK_MODEL = "deepseek/deepseek-v4-flash"
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+DEFAULT_FALLBACK_MODEL = "deepseek/deepseek-chat-v3-0324"
 DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
 DEFAULT_NET_BIBLE_NOTES_URL = "https://labs.bible.org/api/"
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
@@ -312,6 +312,7 @@ COMMENTARY_SOURCE_METADATA = {
     "fbc": {"label": "FreeBibleCommentary — Utley", "emoji": "📖"},
     "net": {"label": "NET Bible Notes", "emoji": "📗"},
     "keener": {"label": "IVP Bible Background — Keener", "emoji": "🌍"},
+    "ccf": {"label": "CCF 問題與解答", "emoji": "✏️"},
 }
 
 
@@ -574,7 +575,7 @@ def parse_requested_commentary_sources(raw: str) -> list[str]:
         raise DiagramError(
             "Unknown commentary source(s): "
             + ", ".join(sorted(invalid))
-            + ". Use fbc, net, keener, or all."
+            + ". Use fbc, net, keener, ccf, or all."
         )
     seen: set[str] = set()
     ordered: list[str] = []
@@ -715,6 +716,35 @@ def load_pdf_commentary(reference: Reference, key: str, cache_dir: Path) -> Comm
             notes[verse_num] = rendered
     meta = COMMENTARY_SOURCE_METADATA[key]
     return CommentarySource(key=key, label=meta["label"], emoji=meta["emoji"], notes=notes)
+
+
+def load_ccf_commentary(reference: Reference, cache_dir: Path) -> CommentarySource:
+    index_path = cache_dir / f"ccf_qa_{reference.book_slug}.json"
+    if not index_path.exists():
+        raise DiagramError(
+            f"Missing commentary index for ccf: {index_path}. "
+            "Run: python3 index_commentary_pdf.py "
+            f"--pdf ~/Downloads/ccf.pdf --book {reference.book_slug} --key ccf"
+        )
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    notes: dict[int, list[str]] = {}
+    for verse_key, entries in payload.items():
+        match = re.fullmatch(r"(\d+):(\d+)", verse_key.strip())
+        if not match:
+            continue
+        chapter_num = int(match.group(1))
+        verse_num = int(match.group(2))
+        if chapter_num != reference.chapter or not _verse_in_scope(reference, verse_num):
+            continue
+        if isinstance(entries, str):
+            rendered = [_normalize_commentary_text(entries)]
+        else:
+            rendered = [_normalize_commentary_text(str(entry)) for entry in entries]
+        rendered = [entry for entry in rendered if entry]
+        if rendered:
+            notes[verse_num] = rendered
+    meta = COMMENTARY_SOURCE_METADATA["ccf"]
+    return CommentarySource(key="ccf", label=meta["label"], emoji=meta["emoji"], notes=notes)
 
 
 def load_bdag_index(cache_dir: Path) -> dict[str, str]:
@@ -871,6 +901,240 @@ def _build_surface_pattern(surface: str) -> str:
     if not parts:
         return ""
     return r"(?:\s|\u00A0|&nbsp;)+".join(re.escape(part) for part in parts)
+
+
+def extract_body_from_output(text: str) -> str:
+    body = text
+    if body.startswith("---"):
+        frontmatter_match = re.match(r"(?s)^---\n.*?\n---\n*", body)
+        if frontmatter_match:
+            body = body[frontmatter_match.end():]
+    body = re.sub(r"(?m)^# .*\n?", "", body, count=1)
+    body = re.sub(r"(?s)\n## OpenRouter Usage\n.*$", "", body)
+    return body.strip()
+
+
+def extract_usage_from_output(text: str) -> dict[str, Any]:
+    match = re.search(r"(?s)\n## OpenRouter Usage\n(.*)$", text)
+    if not match:
+        return {}
+    usage: dict[str, Any] = {}
+    for line in match.group(1).splitlines():
+        bullet_match = re.match(r"^- ([^:]+):\s*(.+)$", line.strip())
+        if not bullet_match:
+            continue
+        key = bullet_match.group(1).strip()
+        value_text = bullet_match.group(2).strip()
+        try:
+            usage[key] = int(value_text)
+        except ValueError:
+            usage[key] = value_text
+    return usage
+
+
+def strip_commentary_blocks(body: str) -> str:
+    cleaned = _remove_commentary_detail_blocks(body)
+    cleaned = _remove_commentary_inline_blocks(cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _remove_commentary_detail_blocks(body: str) -> str:
+    spans = _find_outer_commentary_block_spans(body)
+    if not spans:
+        return body
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(body[cursor:start])
+        cursor = end
+    pieces.append(body[cursor:])
+    return "".join(pieces)
+
+
+def _remove_commentary_inline_blocks(body: str) -> str:
+    lines = body.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if re.match(r"^\*\*Commentary — .+\*\*$", line.strip()):
+            index += 1
+            while index < len(lines):
+                current = lines[index]
+                stripped = current.strip()
+                if not stripped:
+                    index += 1
+                    continue
+                if re.match(r"^\s*<strong>\d+</strong>", current):
+                    break
+                if re.match(r"^\*\*Commentary — .+\*\*$", stripped):
+                    break
+                index += 1
+            continue
+        output.append(line)
+        index += 1
+    return "\n".join(output)
+
+
+def extract_existing_commentary_sources(
+    body: str,
+    reference: Reference,
+) -> dict[str, CommentarySource]:
+    existing: dict[str, dict[int, list[str]]] = {}
+    existing.update(_extract_existing_detail_commentary_sources(body, reference))
+    existing.update(_extract_existing_inline_commentary_sources(body, reference))
+    merged: dict[str, CommentarySource] = {}
+    for key, notes in existing.items():
+        meta = COMMENTARY_SOURCE_METADATA.get(key)
+        if not meta:
+            continue
+        merged[key] = CommentarySource(key=key, label=meta["label"], emoji=meta["emoji"], notes=notes)
+    return merged
+
+
+def _extract_existing_detail_commentary_sources(
+    body: str,
+    reference: Reference,
+) -> dict[str, dict[int, list[str]]]:
+    existing: dict[str, dict[int, list[str]]] = {}
+    for verse_num, block_text, _start, _end in _iter_outer_commentary_blocks(body, reference):
+        for inner_text in _extract_top_level_detail_blocks(block_text):
+            summary_match = re.search(r"<summary>(.*?)</summary>", inner_text, flags=re.DOTALL)
+            if not summary_match:
+                continue
+            summary_text = _normalize_commentary_text(re.sub(r"<[^>]+>", "", summary_match.group(1)))
+            key = _commentary_key_from_summary(summary_text)
+            if not key:
+                continue
+            block_body = inner_text[summary_match.end():]
+            notes = [
+                _normalize_commentary_text(line[2:])
+                for line in block_body.splitlines()
+                if line.strip().startswith("- ")
+            ]
+            notes = [note for note in notes if note]
+            if notes:
+                existing.setdefault(key, {}).setdefault(verse_num, []).extend(notes)
+    return existing
+
+
+def _extract_existing_inline_commentary_sources(
+    body: str,
+    reference: Reference,
+) -> dict[str, dict[int, list[str]]]:
+    existing: dict[str, dict[int, list[str]]] = {}
+    lines = body.splitlines()
+    current_verse: int | None = None
+    current_source_key: str | None = None
+    in_commentary = False
+
+    for line in lines:
+        verse_match = re.match(r"^\s*<strong>(\d+)</strong>", line)
+        if verse_match:
+            current_verse = int(verse_match.group(1))
+            current_source_key = None
+            in_commentary = False
+            continue
+
+        stripped = line.strip()
+        commentary_header = f"**Commentary — {reference.book_label} {reference.chapter}:"
+        if stripped.startswith(commentary_header):
+            current_source_key = None
+            in_commentary = current_verse is not None
+            continue
+
+        if not in_commentary or current_verse is None:
+            continue
+
+        if stripped.startswith("**") and stripped.endswith("**"):
+            summary_text = stripped.strip("*")
+            current_source_key = _commentary_key_from_summary(summary_text)
+            continue
+
+        if stripped.startswith("- ") and current_source_key:
+            note = _normalize_commentary_text(stripped[2:])
+            if note:
+                existing.setdefault(current_source_key, {}).setdefault(current_verse, []).append(note)
+            continue
+
+        if stripped and not stripped.startswith("- "):
+            current_source_key = None
+
+    return existing
+
+
+def _iter_outer_commentary_blocks(
+    body: str,
+    reference: Reference,
+) -> list[tuple[int, str, int, int]]:
+    blocks: list[tuple[int, str, int, int]] = []
+    for start, end in _find_outer_commentary_block_spans(body):
+        block = body[start:end]
+        summary_match = re.search(
+            rf"<summary><strong>Commentary — {re.escape(reference.book_label)} {reference.chapter}:(\d+)</strong></summary>",
+            block,
+        )
+        if not summary_match:
+            continue
+        verse_num = int(summary_match.group(1))
+        inner = block[summary_match.end():]
+        inner = re.sub(r"</details>\s*$", "", inner, flags=re.DOTALL).strip()
+        blocks.append((verse_num, inner, start, end))
+    return blocks
+
+
+def _find_outer_commentary_block_spans(body: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start_pattern = re.compile(r"<details>\s*<summary><strong>Commentary — .*?</strong></summary>", re.DOTALL)
+    token_pattern = re.compile(r"</?details>")
+    for match in start_pattern.finditer(body):
+        start = match.start()
+        depth = 0
+        end = None
+        for token in token_pattern.finditer(body, start):
+            if token.group() == "<details>":
+                depth += 1
+            else:
+                depth -= 1
+                if depth == 0:
+                    end = token.end()
+                    break
+        if end is not None:
+            spans.append((start, end))
+    deduped: list[tuple[int, int]] = []
+    last_end = -1
+    for start, end in spans:
+        if start < last_end:
+            continue
+        deduped.append((start, end))
+        last_end = end
+    return deduped
+
+
+def _extract_top_level_detail_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    token_pattern = re.compile(r"</?details>")
+    depth = 0
+    current_start: int | None = None
+    for token in token_pattern.finditer(text):
+        if token.group() == "<details>":
+            if depth == 0:
+                current_start = token.start()
+            depth += 1
+            continue
+        depth -= 1
+        if depth == 0 and current_start is not None:
+            blocks.append(text[current_start:token.end()])
+            current_start = None
+    return blocks
+
+
+def _commentary_key_from_summary(summary_text: str) -> str | None:
+    normalized = _normalize_commentary_text(summary_text)
+    for key, meta in COMMENTARY_SOURCE_METADATA.items():
+        if meta["label"] in normalized:
+            return key
+    return None
 
 
 def add_commentary_footnotes(
@@ -1558,12 +1822,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--commentary-sources",
         default="fbc",
-        help="Comma-separated commentary sources: fbc, net, keener, or all",
+        help="Comma-separated commentary sources: fbc, net, keener, ccf, or all",
     )
     parser.add_argument(
         "--bold-words",
         action="store_true",
         help="Bold lexically significant Greek-linked words in the diagram output",
+    )
+    parser.add_argument(
+        "--commentary-only",
+        action="store_true",
+        help="Skip diagram generation; read existing output and merge new commentary sources",
     )
     parser.add_argument(
         "--no-cache",
@@ -1582,18 +1851,20 @@ def main() -> int:
     args = parse_args()
     reference = parse_reference(args.reference)
     data_dir = Path(args.data_dir)
+    if "all" in {item.strip().lower() for item in args.commentary_sources.split(",") if item.strip()}:
+        args.bold_words = True
     xml_path = ensure_macula_xml(reference, data_dir)
     verse_words = extract_macula_words(xml_path, reference)
     # --- Parallelize independent I/O: Bible text, commentary sources, BDAG index ---
     bdag_index: dict[str, str] = {}
     commentary_sources: list[CommentarySource] = []
-    english_text = ""
+    english_text: dict[int, str] = {}
 
     requested_sources: list[str] = []
     if args.footnotes:
         requested_sources = parse_requested_commentary_sources(args.commentary_sources)
 
-    def _fetch_english() -> str:
+    def _fetch_english() -> dict[int, str]:
         if args.english_source == "macula-gloss":
             return build_gloss_fallback(verse_words)
         try:
@@ -1609,7 +1880,65 @@ def main() -> int:
             return fetch_fbc_commentary_source(reference)
         if key == "net":
             return fetch_net_bible_notes(reference)
+        if key == "ccf":
+            return load_ccf_commentary(reference, data_dir)
         return load_pdf_commentary(reference, key, data_dir)
+
+    if args.commentary_only:
+        output_path = Path(args.output_dir) / f"{reference.output_stem}.md"
+        if not output_path.exists():
+            raise DiagramError(f"Commentary-only mode requires an existing output file: {output_path}")
+
+        existing_text = output_path.read_text(encoding="utf-8")
+        existing_body = extract_body_from_output(existing_text)
+        usage = extract_usage_from_output(existing_text)
+        base_body = strip_commentary_blocks(existing_body)
+        existing_sources = extract_existing_commentary_sources(existing_body, reference)
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
+            bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
+
+            if bdag_future is not None:
+                bdag_index = bdag_future.result()
+            for key in requested_sources:
+                try:
+                    fetched = commentary_futures[key].result()
+                    existing_sources[key] = fetched
+                except Exception as exc:
+                    print(f"Warning: {key} commentary failed ({exc}), skipping.", file=sys.stderr)
+
+        commentary_sources = [
+            existing_sources[key]
+            for key in COMMENTARY_SOURCE_METADATA
+            if key in existing_sources
+        ]
+        bold_words = identify_bold_words(verse_words, bdag_index) if bdag_index else {}
+        body = base_body
+        if bold_words:
+            body = apply_bold_words(body, bold_words)
+        body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
+        if commentary_sources:
+            body = add_commentary_footnotes(
+                body,
+                reference,
+                commentary_sources,
+                args.footnotes_style,
+                bold_words,
+            )
+        output_path = write_output(reference, body, usage, Path(args.output_dir))
+        publish_dir = resolve_publish_dir(args)
+        print(output_path)
+        if publish_dir is not None:
+            try:
+                published_path = publish_output(output_path, publish_dir, args.publish_mode)
+                print(published_path)
+            except OSError as exc:
+                print(
+                    f"Warning: could not publish {output_path.name} to {publish_dir} ({exc}).",
+                    file=sys.stderr,
+                )
+        return 0
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         english_future = pool.submit(_fetch_english)
