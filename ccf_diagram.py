@@ -27,7 +27,7 @@ DEFAULT_MACULA_BASE_URL = (
 )
 DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-chat-v3-0324"
-DEFAULT_FALLBACK_MODEL = "openai/gpt-4.1-mini"
+DEFAULT_FALLBACK_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
 DEFAULT_NET_BIBLE_NOTES_URL = "https://labs.bible.org/api/"
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
