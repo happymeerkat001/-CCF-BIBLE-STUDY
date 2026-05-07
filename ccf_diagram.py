@@ -31,6 +31,7 @@ DEFAULT_FALLBACK_MODEL = "deepseek/deepseek-chat-v3-0324"
 DEFAULT_FREEBIBLECOMMENTARY_BASE_URL = "https://www.freebiblecommentary.org"
 DEFAULT_NET_BIBLE_NOTES_URL = "https://labs.bible.org/api/"
 DEFAULT_CHINESE_BIBLE_ENDPOINT = "https://api.getbible.net/v2/cus"
+CHUNK_SIZE = 10
 DEFAULT_OBSIDIAN_BIBLE_STUDY_DIR = (
     "/Users/leon/Library/Mobile Documents/iCloud~md~obsidian/Documents/"
     "Neural-orchestrator/Bible Study"
@@ -269,6 +270,30 @@ class Reference:
         if self.start_verse == self.end_verse:
             return f"{self.book_label} {self.chapter}:{self.start_verse}"
         return f"{self.book_label} {self.chapter}:{self.start_verse}-{self.end_verse}"
+
+
+def chunk_reference(reference: Reference, chunk_size: int = CHUNK_SIZE) -> list[Reference]:
+    if reference.start_verse is None or reference.end_verse is None:
+        return [reference]
+    if reference.end_verse - reference.start_verse + 1 <= chunk_size:
+        return [reference]
+
+    chunks: list[Reference] = []
+    chunk_start = reference.start_verse
+    while chunk_start <= reference.end_verse:
+        chunk_end = min(chunk_start + chunk_size - 1, reference.end_verse)
+        chunks.append(
+            Reference(
+                original=reference.original,
+                book_slug=reference.book_slug,
+                book_label=reference.book_label,
+                chapter=reference.chapter,
+                start_verse=chunk_start,
+                end_verse=chunk_end,
+            )
+        )
+        chunk_start = chunk_end + 1
+    return chunks
 
 
 @dataclass
@@ -1675,11 +1700,13 @@ def normalize_marker_text(text: str) -> str:
     return normalized.lower()
 
 
-def validate_diagram_body(body: str) -> list[str]:
+def validate_diagram_body(body: str, start_verse: int = 1) -> list[str]:
     errors: list[str] = []
     stripped = body.lstrip()
-    if not stripped.startswith("<strong>1</strong>"):
-        errors.append("Output must begin directly with the first verse number and contain no explanatory preamble.")
+    if not stripped.startswith(f"<strong>{start_verse}</strong>"):
+        errors.append(
+            f"Output must begin directly with verse {start_verse} and contain no explanatory preamble."
+        )
     if re.search(r"<mark(?![^>]*background:)", body):
         errors.append("Every <mark> tag must include an explicit allowed background.")
     if "background: red" in body:
@@ -1759,7 +1786,7 @@ def autofix_diagram_body(body: str) -> str:
     return body
 
 
-def build_repair_prompt(original_prompt: str, draft_body: str, errors: list[str]) -> str:
+def build_repair_prompt(draft_body: str, errors: list[str]) -> str:
     repair_lines = "\n".join(f"- {error}" for error in errors)
     return (
         "Revise the following draft diagram so it fully obeys the formatting rules.\n"
@@ -1767,56 +1794,148 @@ def build_repair_prompt(original_prompt: str, draft_body: str, errors: list[str]
         "Return only corrected HTML-in-Markdown body content with no explanation.\n\n"
         "Validation errors to fix:\n"
         f"{repair_lines}\n\n"
-        "Original source data:\n"
-        f"{original_prompt}\n"
         "Draft output to repair:\n"
         f"{draft_body}\n"
     )
 
 
-def generate_validated_diagram(prompt: str, model: str, max_attempts: int = 3) -> tuple[str, dict[str, Any]]:
+def generate_validated_diagram(
+    prompt: str,
+    model: str,
+    max_attempts: int = 3,
+    start_verse: int = 1,
+    label: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    target_label = label or f"verses {start_verse}"
+    print(f"Generating diagram for {target_label}...", file=sys.stderr)
     body, usage = call_openrouter(prompt, model)
     body = autofix_diagram_body(body)
-    errors = validate_diagram_body(body)
+    errors = validate_diagram_body(body, start_verse=start_verse)
     if not errors:
         return body, usage
 
     total_usage = dict(usage)
-    for _ in range(max_attempts - 1):
-        repair_prompt = build_repair_prompt(prompt, body, errors)
+    for attempt in range(max_attempts - 1):
+        print(
+            f"Repair attempt {attempt + 1}/{max_attempts - 1} for {target_label}...",
+            file=sys.stderr,
+        )
+        repair_prompt = build_repair_prompt(body, errors)
         body, repair_usage = call_openrouter(repair_prompt, model)
         body = autofix_diagram_body(body)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total_usage[key] = total_usage.get(key, 0) + repair_usage.get(key, 0)
-        errors = validate_diagram_body(body)
+        errors = validate_diagram_body(body, start_verse=start_verse)
         if not errors:
             return body, total_usage
 
     fallback_model = os.getenv("DIAGRAM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL).strip()
     if fallback_model and fallback_model != model:
         print(
-            f"Warning: {model} failed diagram validation; retrying with fallback model {fallback_model}.",
+            f"Warning: {model} failed diagram validation for {target_label}; retrying with fallback model {fallback_model}.",
             file=sys.stderr,
         )
         body, fallback_usage = call_openrouter(prompt, fallback_model)
         body = autofix_diagram_body(body)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total_usage[key] = total_usage.get(key, 0) + fallback_usage.get(key, 0)
-        errors = validate_diagram_body(body)
+        errors = validate_diagram_body(body, start_verse=start_verse)
         if not errors:
             return body, total_usage
 
-        for _ in range(max_attempts - 1):
-            repair_prompt = build_repair_prompt(prompt, body, errors)
+        for attempt in range(max_attempts - 1):
+            print(
+                f"Repair attempt {attempt + 1}/{max_attempts - 1} with fallback model for {target_label}...",
+                file=sys.stderr,
+            )
+            repair_prompt = build_repair_prompt(body, errors)
             body, repair_usage = call_openrouter(repair_prompt, fallback_model)
             body = autofix_diagram_body(body)
             for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 total_usage[key] = total_usage.get(key, 0) + repair_usage.get(key, 0)
-            errors = validate_diagram_body(body)
+            errors = validate_diagram_body(body, start_verse=start_verse)
             if not errors:
                 return body, total_usage
 
     raise DiagramError("Model output failed validation after repair attempts:\n- " + "\n- ".join(errors))
+
+
+def _sum_usage_dicts(usages: list[dict[str, Any]]) -> dict[str, Any]:
+    total: dict[str, Any] = {}
+    for usage in usages:
+        for key, value in usage.items():
+            if isinstance(value, int):
+                total[key] = total.get(key, 0) + value
+            elif key not in total:
+                total[key] = value
+    return total
+
+
+def generate_diagram_for_reference(
+    reference: Reference,
+    verse_words: dict[int, list[WordEntry]],
+    english_text: dict[int, str],
+    model: str,
+    max_attempts: int = 3,
+    chunk_size: int = CHUNK_SIZE,
+) -> tuple[str, dict[str, Any]]:
+    chunks = chunk_reference(reference, chunk_size)
+    if len(chunks) == 1:
+        prompt = build_user_prompt(reference, verse_words, english_text)
+        start_verse = reference.start_verse or 1
+        return generate_validated_diagram(
+            prompt,
+            model,
+            max_attempts=max_attempts,
+            start_verse=start_verse,
+            label=reference.verse_range_label,
+        )
+
+    print(
+        f"Splitting {reference.verse_range_label} into {len(chunks)} chunks of up to {chunk_size} verses.",
+        file=sys.stderr,
+    )
+
+    def _generate_chunk(chunk: Reference) -> tuple[Reference, str, dict[str, Any]]:
+        chunk_verse_words = {
+            verse_num: words
+            for verse_num, words in verse_words.items()
+            if _verse_in_scope(chunk, verse_num)
+        }
+        chunk_english_text = {
+            verse_num: text
+            for verse_num, text in english_text.items()
+            if _verse_in_scope(chunk, verse_num)
+        }
+        prompt = build_user_prompt(chunk, chunk_verse_words, chunk_english_text)
+        body, usage = generate_validated_diagram(
+            prompt,
+            model,
+            max_attempts=max_attempts,
+            start_verse=chunk.start_verse or 1,
+            label=chunk.verse_range_label,
+        )
+        return chunk, body, usage
+
+    chunk_results: dict[tuple[int, int], tuple[str, dict[str, Any]]] = {}
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 4)) as pool:
+        futures = {
+            pool.submit(_generate_chunk, chunk): chunk
+            for chunk in chunks
+        }
+        for future in as_completed(futures):
+            chunk, body, usage = future.result()
+            key = (chunk.start_verse or 1, chunk.end_verse or chunk.start_verse or 1)
+            chunk_results[key] = (body, usage)
+
+    ordered_bodies: list[str] = []
+    ordered_usages: list[dict[str, Any]] = []
+    for chunk in chunks:
+        key = (chunk.start_verse or 1, chunk.end_verse or chunk.start_verse or 1)
+        body, usage = chunk_results[key]
+        ordered_bodies.append(body.strip())
+        ordered_usages.append(usage)
+    return "\n\n".join(ordered_bodies).strip(), _sum_usage_dicts(ordered_usages)
 
 
 def write_output(reference: Reference, body: str, usage: dict[str, Any], output_dir: Path) -> Path:
@@ -2000,12 +2119,19 @@ def main() -> int:
     cached = None
     if not args.commentary_only and not args.no_cache and not args.dump_prompt:
         cached = load_cached_diagram(reference, args.model)
+        if cached is not None:
+            print("Using cached diagram", file=sys.stderr)
 
     need_prompt_data = args.commentary_only or args.dump_prompt or cached is None
     need_verse_words = need_prompt_data or args.bold_words
 
     verse_words: dict[int, list[WordEntry]] = {}
     if need_verse_words:
+        xml_path = data_dir / BOOK_XML_FILENAMES.get(reference.book_slug, f"{reference.book_slug}.xml")
+        if xml_path.exists():
+            print(f"MACULA XML cached: {xml_path.name}", file=sys.stderr)
+        else:
+            print(f"Fetching MACULA XML for {reference.book_label}...", file=sys.stderr)
         xml_path = ensure_macula_xml(reference, data_dir)
         verse_words = extract_macula_words(xml_path, reference)
     # --- Parallelize independent I/O: Bible text, commentary sources, BDAG index ---
@@ -2015,10 +2141,11 @@ def main() -> int:
     chinese_text: dict[int, str] = {}
 
     requested_sources: list[str] = []
-    if args.footnotes:
+    if args.footnotes and not args.dump_prompt:
         requested_sources = parse_requested_commentary_sources(args.commentary_sources)
 
     def _fetch_english() -> dict[int, str]:
+        print(f"Fetching English text for {reference.verse_range_label}...", file=sys.stderr)
         if args.english_source == "macula-gloss":
             return build_gloss_fallback(verse_words)
         try:
@@ -2030,6 +2157,7 @@ def main() -> int:
             return build_gloss_fallback(verse_words)
 
     def _fetch_commentary(key: str) -> CommentarySource:
+        print(f"Fetching {key} commentary for {reference.verse_range_label}...", file=sys.stderr)
         if key == "fbc":
             return fetch_fbc_commentary_source(reference, data_dir)
         if key == "net":
@@ -2051,10 +2179,14 @@ def main() -> int:
 
         with ThreadPoolExecutor(max_workers=6) as pool:
             commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
-            bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
+            bdag_future = (
+                pool.submit(load_bdag_index, data_dir)
+                if args.bold_words and not args.dump_prompt
+                else None
+            )
             chinese_future = (
                 pool.submit(fetch_chinese_bible_text, reference, data_dir)
-                if not args.no_chinese
+                if not args.no_chinese and not args.dump_prompt
                 else None
             )
 
@@ -2077,11 +2209,14 @@ def main() -> int:
         bold_words = identify_bold_words(verse_words, bdag_index) if bdag_index else {}
         body = base_body
         if bold_words:
+            print("Applying bold words...", file=sys.stderr)
             body = apply_bold_words(body, bold_words)
         body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
         if chinese_text:
+            print("Applying Chinese text...", file=sys.stderr)
             body = inject_chinese_text(body, chinese_text)
         if commentary_sources:
+            print("Applying commentary footnotes...", file=sys.stderr)
             body = add_commentary_footnotes(
                 body,
                 reference,
@@ -2106,10 +2241,14 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=6) as pool:
         english_future = pool.submit(_fetch_english) if need_prompt_data else None
         commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
-        bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
+        bdag_future = (
+            pool.submit(load_bdag_index, data_dir)
+            if args.bold_words and not args.dump_prompt
+            else None
+        )
         chinese_future = (
             pool.submit(fetch_chinese_bible_text, reference, data_dir)
-            if not args.no_chinese
+            if not args.no_chinese and not args.dump_prompt
             else None
         )
 
@@ -2132,19 +2271,26 @@ def main() -> int:
 
     if cached is not None:
         body, usage = cached
-        print("Using cached diagram", file=sys.stderr)
     else:
-        body, usage = generate_validated_diagram(prompt, args.model)
+        body, usage = generate_diagram_for_reference(
+            reference,
+            verse_words,
+            english_text,
+            args.model,
+        )
         save_cached_diagram(reference, args.model, body, usage)
     bold_words = identify_bold_words(verse_words, bdag_index) if bdag_index else {}
     if bold_words:
+        print("Applying bold words...", file=sys.stderr)
         body = apply_bold_words(body, bold_words)
     # Obsidian Live Preview does not consistently render HTML entities like `&nbsp;`.
     # Convert them to real NBSP characters so indentation displays correctly while editing.
     body = body.replace("&nbsp;", "\u00A0").replace("&nbsp", "\u00A0")
     if chinese_text:
+        print("Applying Chinese text...", file=sys.stderr)
         body = inject_chinese_text(body, chinese_text)
     if commentary_sources:
+        print("Applying commentary footnotes...", file=sys.stderr)
         body = add_commentary_footnotes(
             body,
             reference,
