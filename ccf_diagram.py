@@ -238,6 +238,7 @@ BOOK_TO_FBC_SERIES = {
     "revelation": ("VOL12", "VOL12"),
 }
 PROMPT_PATH = Path("prompts/diagram_system.md")
+NETWORK_CACHE_DIRNAME = "network_cache"
 
 
 class DiagramError(RuntimeError):
@@ -436,13 +437,30 @@ def fetch_commentary(reference: Reference) -> dict[int, list[str]]:
     return parse_fbc_commentary_lines(reference, lines)
 
 
-def fetch_fbc_commentary_source(reference: Reference) -> CommentarySource:
+def fetch_fbc_commentary_source(reference: Reference, cache_dir: Path) -> CommentarySource:
     meta = COMMENTARY_SOURCE_METADATA["fbc"]
+    cache_path = _network_cache_path(cache_dir, "fbc", reference)
+    cached_notes = _load_cached_json(cache_path)
+    if isinstance(cached_notes, dict):
+        normalized_notes = {
+            int(verse): [str(note) for note in notes if str(note).strip()]
+            for verse, notes in cached_notes.items()
+            if str(verse).isdigit() and isinstance(notes, list)
+        }
+        return CommentarySource(
+            key="fbc",
+            label=meta["label"],
+            emoji=meta["emoji"],
+            notes=normalized_notes,
+        )
+
+    notes = fetch_commentary(reference)
+    _save_cached_json(cache_path, notes)
     return CommentarySource(
         key="fbc",
         label=meta["label"],
         emoji=meta["emoji"],
-        notes=fetch_commentary(reference),
+        notes=notes,
     )
 
 
@@ -566,6 +584,30 @@ def _verse_in_scope(reference: Reference, verse_num: int) -> bool:
     return reference.start_verse <= verse_num <= end_verse
 
 
+def _reference_cache_stem(reference: Reference) -> str:
+    start = reference.start_verse or 1
+    end = reference.end_verse or start
+    return f"{reference.book_slug}_{reference.chapter}_{start}-{end}"
+
+
+def _network_cache_path(cache_dir: Path, category: str, reference: Reference) -> Path:
+    return cache_dir / NETWORK_CACHE_DIRNAME / category / f"{_reference_cache_stem(reference)}.json"
+
+
+def _load_cached_json(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _save_cached_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def parse_requested_commentary_sources(raw: str) -> list[str]:
     if not raw:
         return ["fbc"]
@@ -590,7 +632,23 @@ def parse_requested_commentary_sources(raw: str) -> list[str]:
     return ordered
 
 
-def fetch_net_bible_notes(reference: Reference) -> CommentarySource:
+def fetch_net_bible_notes(reference: Reference, cache_dir: Path) -> CommentarySource:
+    cache_path = _network_cache_path(cache_dir, "net", reference)
+    cached_notes = _load_cached_json(cache_path)
+    meta = COMMENTARY_SOURCE_METADATA["net"]
+    if isinstance(cached_notes, dict):
+        normalized_notes = {
+            int(verse): [str(note) for note in notes if str(note).strip()]
+            for verse, notes in cached_notes.items()
+            if str(verse).isdigit() and isinstance(notes, list)
+        }
+        return CommentarySource(
+            key="net",
+            label=meta["label"],
+            emoji=meta["emoji"],
+            notes=normalized_notes,
+        )
+
     params = {
         "passage": reference.verse_range_label,
         "type": "json",
@@ -621,7 +679,7 @@ def fetch_net_bible_notes(reference: Reference) -> CommentarySource:
         if rendered:
             notes[verse_num] = rendered
 
-    meta = COMMENTARY_SOURCE_METADATA["net"]
+    _save_cached_json(cache_path, notes)
     return CommentarySource(
         key="net",
         label=meta["label"],
@@ -1384,7 +1442,7 @@ def fetch_bible_text(reference: Reference) -> dict[int, str]:
     return verses
 
 
-def fetch_chinese_bible_text(reference: Reference) -> dict[int, str]:
+def fetch_chinese_bible_text(reference: Reference, cache_dir: Path) -> dict[int, str]:
     book_num = SLUG_TO_BOOK_NUM.get(reference.book_slug)
     if book_num is None:
         print(
@@ -1392,6 +1450,15 @@ def fetch_chinese_bible_text(reference: Reference) -> dict[int, str]:
             file=sys.stderr,
         )
         return {}
+
+    cache_path = _network_cache_path(cache_dir, "zh", reference)
+    cached_verses = _load_cached_json(cache_path)
+    if isinstance(cached_verses, dict):
+        return {
+            int(verse): str(text).strip()
+            for verse, text in cached_verses.items()
+            if str(verse).isdigit() and str(text).strip()
+        }
 
     endpoint = os.getenv("CHINESE_BIBLE_ENDPOINT", DEFAULT_CHINESE_BIBLE_ENDPOINT).rstrip("/")
     url = f"{endpoint}/{book_num}/{reference.chapter}.json"
@@ -1420,6 +1487,7 @@ def fetch_chinese_bible_text(reference: Reference) -> dict[int, str]:
         text = re.sub(r"\s+", " ", str(entry.get("text", ""))).strip()
         if text:
             verses[verse_num] = text
+    _save_cached_json(cache_path, verses)
     return verses
 
 
@@ -1929,8 +1997,17 @@ def main() -> int:
     data_dir = Path(args.data_dir)
     if "all" in {item.strip().lower() for item in args.commentary_sources.split(",") if item.strip()}:
         args.bold_words = True
-    xml_path = ensure_macula_xml(reference, data_dir)
-    verse_words = extract_macula_words(xml_path, reference)
+    cached = None
+    if not args.commentary_only and not args.no_cache and not args.dump_prompt:
+        cached = load_cached_diagram(reference, args.model)
+
+    need_prompt_data = args.commentary_only or args.dump_prompt or cached is None
+    need_verse_words = need_prompt_data or args.bold_words
+
+    verse_words: dict[int, list[WordEntry]] = {}
+    if need_verse_words:
+        xml_path = ensure_macula_xml(reference, data_dir)
+        verse_words = extract_macula_words(xml_path, reference)
     # --- Parallelize independent I/O: Bible text, commentary sources, BDAG index ---
     bdag_index: dict[str, str] = {}
     commentary_sources: list[CommentarySource] = []
@@ -1954,9 +2031,9 @@ def main() -> int:
 
     def _fetch_commentary(key: str) -> CommentarySource:
         if key == "fbc":
-            return fetch_fbc_commentary_source(reference)
+            return fetch_fbc_commentary_source(reference, data_dir)
         if key == "net":
-            return fetch_net_bible_notes(reference)
+            return fetch_net_bible_notes(reference, data_dir)
         if key == "ccf":
             return load_ccf_commentary(reference, data_dir)
         return load_pdf_commentary(reference, key, data_dir)
@@ -1976,7 +2053,9 @@ def main() -> int:
             commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
             bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
             chinese_future = (
-                pool.submit(fetch_chinese_bible_text, reference) if not args.no_chinese else None
+                pool.submit(fetch_chinese_bible_text, reference, data_dir)
+                if not args.no_chinese
+                else None
             )
 
             if bdag_future is not None:
@@ -2025,12 +2104,17 @@ def main() -> int:
         return 0
 
     with ThreadPoolExecutor(max_workers=6) as pool:
-        english_future = pool.submit(_fetch_english)
+        english_future = pool.submit(_fetch_english) if need_prompt_data else None
         commentary_futures = {key: pool.submit(_fetch_commentary, key) for key in requested_sources}
         bdag_future = pool.submit(load_bdag_index, data_dir) if args.bold_words else None
-        chinese_future = pool.submit(fetch_chinese_bible_text, reference) if not args.no_chinese else None
+        chinese_future = (
+            pool.submit(fetch_chinese_bible_text, reference, data_dir)
+            if not args.no_chinese
+            else None
+        )
 
-        english_text = sanitize_english_text(english_future.result())
+        if english_future is not None:
+            english_text = sanitize_english_text(english_future.result())
         if bdag_future is not None:
             bdag_index = bdag_future.result()
         if chinese_future is not None:
@@ -2040,13 +2124,12 @@ def main() -> int:
                 commentary_sources.append(commentary_futures[key].result())
             except Exception as exc:
                 print(f"Warning: {key} commentary failed ({exc}), skipping.", file=sys.stderr)
-    prompt = build_user_prompt(reference, verse_words, english_text)
+    prompt = build_user_prompt(reference, verse_words, english_text) if need_prompt_data else ""
 
     if args.dump_prompt:
         print(prompt)
         return 0
 
-    cached = None if args.no_cache else load_cached_diagram(reference, args.model)
     if cached is not None:
         body, usage = cached
         print("Using cached diagram", file=sys.stderr)
